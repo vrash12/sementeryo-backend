@@ -163,6 +163,34 @@ app.use((req, _res, next) => {
   next();
 });
 
+app.get("/api/debug/db", async (_req, res) => {
+  try {
+    const db = await pool.query(
+      "SELECT current_database() AS db, current_schema() AS schema"
+    );
+
+    const users = await pool.query(
+      "SELECT to_regclass('public.users') AS users_table"
+    );
+
+    const plots = await pool.query(
+      "SELECT to_regclass('public.plots') AS plots_table"
+    );
+
+    res.json({
+      ok: true,
+      database: db.rows[0],
+      tables: {
+        users: users.rows[0].users_table,
+        plots: plots.rows[0].plots_table,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+
 /* --------------------------- Error Handlers ------------------------------ */
 app.use(notFound);
 app.use(errorHandler);
