@@ -1082,12 +1082,23 @@ async function getVisitorUsers(req, res, next) {
 
 async function dashboardMetrics(req, res, next) {
   try {
-    if (!isPrivileged(req.user))
+    if (!isPrivileged(req.user)) {
       return res.status(403).json({ error: "Forbidden" });
+    }
 
-    // ✅ make burial_schedules optional (avoid crash if table missing)
+    // optional tables/columns
     const hasBurialSchedules = await hasTable("burial_schedules");
+    const hasPlotCode = await hasColumn("plots", "plot_code");
 
+    const mrHasRequesterId = await hasColumn("maintenance_requests", "requester_id");
+    const mrHasFamilyContact = await hasColumn("maintenance_requests", "family_contact");
+
+    const uHasFirst = await hasColumn("users", "first_name");
+    const uHasLast = await hasColumn("users", "last_name");
+    const uHasUsername = await hasColumn("users", "username");
+    const uHasEmail = await hasColumn("users", "email");
+
+    // ---------- COUNTS ----------
     const pendingBurialsExpr = hasBurialSchedules
       ? `(SELECT COUNT(*) FROM burial_schedules WHERE status = 'pending')`
       : `0`;
@@ -1103,15 +1114,15 @@ async function dashboardMetrics(req, res, next) {
     `;
 
     const plotStatsQuery = `
-      SELECT status, COUNT(*) as count
+      SELECT status, COUNT(*)::int AS count
       FROM plots
       GROUP BY status
+      ORDER BY status
     `;
 
-    // optional upcoming burials
+    // ---------- UPCOMING BURIALS (optional) ----------
     let upcomingBurials = { rows: [] };
     if (hasBurialSchedules) {
-      const hasPlotCode = await hasColumn("plots", "plot_code");
       const plotLabelSql = hasPlotCode
         ? `COALESCE(p.plot_code::text, p.plot_name::text) AS plot_label`
         : `p.plot_name::text AS plot_label`;
@@ -1134,6 +1145,42 @@ async function dashboardMetrics(req, res, next) {
       upcomingBurials = await pool.query(upcomingBurialsQuery);
     }
 
+    // ---------- RECENT MAINTENANCE ----------
+    // Build the best possible join key for requester:
+    // Prefer requester_id; fallback to family_contact if requester_id is null/missing.
+    let joinKeyExpr = "NULL";
+    if (mrHasRequesterId && mrHasFamilyContact) {
+      joinKeyExpr = `COALESCE(mr.requester_id::text, mr.family_contact::text)`;
+    } else if (mrHasRequesterId) {
+      joinKeyExpr = `mr.requester_id::text`;
+    } else if (mrHasFamilyContact) {
+      joinKeyExpr = `mr.family_contact::text`;
+    }
+
+    // Build requester display name safely (no u.full_name usage)
+    const namePieces = [];
+    if (uHasFirst) namePieces.push(`COALESCE(u.first_name,'')`);
+    if (uHasLast) namePieces.push(`COALESCE(u.last_name,'')`);
+
+    const fullNameExpr =
+      namePieces.length === 2
+        ? `NULLIF(TRIM(${namePieces[0]} || ' ' || ${namePieces[1]}), '')`
+        : namePieces.length === 1
+        ? `NULLIF(TRIM(${namePieces[0]}), '')`
+        : `NULL`;
+
+    const usernameExpr = uHasUsername ? `NULLIF(TRIM(u.username), '')` : `NULL`;
+    const emailExpr = uHasEmail ? `NULLIF(TRIM(u.email), '')` : `NULL`;
+
+    const requesterNameExpr = `
+      COALESCE(
+        ${fullNameExpr},
+        ${usernameExpr},
+        ${emailExpr},
+        ('User #' || u.id::text)
+      ) AS requester_name
+    `;
+
     const recentMaintenanceQuery = `
       SELECT
         mr.id,
@@ -1142,10 +1189,11 @@ async function dashboardMetrics(req, res, next) {
         mr.priority,
         mr.status,
         mr.created_at,
-        u.first_name || ' ' || u.last_name as requester_name
+        ${requesterNameExpr}
       FROM maintenance_requests mr
-      LEFT JOIN users u ON mr.requester_id = u.id
-      ORDER BY mr.created_at DESC
+      LEFT JOIN users u
+        ON u.id::text = ${joinKeyExpr}
+      ORDER BY mr.created_at DESC NULLS LAST, mr.id DESC
       LIMIT 5
     `;
 
@@ -1165,6 +1213,7 @@ async function dashboardMetrics(req, res, next) {
     next(err);
   }
 }
+
 
 async function getPlotDetails(req, res, next) {
   try {
