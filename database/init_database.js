@@ -1,44 +1,31 @@
 // backend/database/init_database.js
+"use strict";
+
 const { Pool } = require("pg");
 const fs = require("fs");
 const path = require("path");
-require("dotenv").config({ path: path.resolve(process.cwd(), ".env") });
 
-/**
- * Uses Render's DATABASE_URL (or local .env) to:
- * 1) load backend/database/data.sql
- * 2) execute it (schema + functions + seed if included)
- * 3) verify PostGIS + key objects exist
- *
- * Run:
- *   node backend/database/init_database.js
- *
- * Tip (Render Shell):
- *   NODE_ENV=production node backend/database/init_database.js
- */
+// Load .env from backend/.env first, then root .env
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+require("dotenv").config({ path: path.resolve(process.cwd(), ".env") });
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
 if (!DATABASE_URL) {
   console.error("❌ Missing DATABASE_URL in environment variables.");
-  console.error("   Set DATABASE_URL (Render Internal Database URL) then re-run.");
   process.exit(1);
 }
 
-const isProd = process.env.NODE_ENV === "production";
+const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+const looksLikeRender = /render\.com/i.test(DATABASE_URL);
 
-/**
- * Render Postgres typically requires SSL.
- * - In prod: use SSL with rejectUnauthorized:false
- * - In local dev: usually no SSL needed (unless you want it)
- */
+// Render typically requires SSL
+const ssl =
+  isProd || looksLikeRender ? { rejectUnauthorized: false } : false;
+
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: isProd ? { rejectUnauthorized: false } : false,
-  // Optional hardening:
-  // max: 5,
-  // idleTimeoutMillis: 30000,
-  // connectionTimeoutMillis: 10000,
+  ssl,
 });
 
 pool.on("connect", () => console.log("✅ Connected to PostgreSQL"));
@@ -46,27 +33,24 @@ pool.on("error", (err) => console.error("❌ Pool error:", err));
 
 function readSqlFile(fileName) {
   const filePath = path.join(__dirname, fileName);
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`SQL file not found: ${filePath}`);
-  }
+  if (!fs.existsSync(filePath)) throw new Error(`SQL file not found: ${filePath}`);
   return fs.readFileSync(filePath, "utf8");
 }
 
-/**
- * If your data.sql contains multiple statements (it will),
- * pg can still run it in one query, BUT:
- * - if it contains psql meta-commands like \i, \c, \copy, it will fail.
- * Ensure data.sql is plain SQL only.
- */
-async function runSql(sql) {
-  // Wrap in a transaction so partial failures rollback
+async function runSqlTransactional(sql) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(sql);
+
+    // ✅ IMPORTANT: force SIMPLE query mode
+    // This avoids protocol issues with big multi-statement SQL scripts.
+    await client.query({ text: sql, queryMode: "simple" });
+
     await client.query("COMMIT");
   } catch (e) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
     throw e;
   } finally {
     client.release();
@@ -76,48 +60,74 @@ async function runSql(sql) {
 async function safeQuery(label, sql) {
   try {
     const res = await pool.query(sql);
-    console.log(`✅ ${label}:`, res.rows?.[0] ?? res.rows);
+    console.log(`✅ ${label}:`, res.rows);
     return res;
   } catch (e) {
-    console.warn(`⚠️ ${label} check failed:`, e.message);
+    console.warn(`⚠️ ${label} failed: ${e.message}`);
     return null;
   }
 }
 
 async function initializeDatabase() {
   console.log("🗄️ Initializing Cemetery Database...");
+  console.log("ENV NODE_ENV:", process.env.NODE_ENV || "(not set)");
+  console.log("SSL enabled?:", !!ssl);
+
+  // Print a redacted connection target (helps catch “wrong URL” mistakes)
+  try {
+    const u = new URL(DATABASE_URL);
+    console.log("DB host:", u.hostname);
+    console.log("DB port:", u.port || "(default)");
+    console.log("DB name:", u.pathname?.replace("/", "") || "(unknown)");
+  } catch {
+    console.log("DB URL not parseable by URL() (still may be valid).");
+  }
 
   try {
-    // 1) Load SQL
-    const schemaSQL = readSqlFile("sample.sql");
-    console.log("📄 Loaded data.sql");
+    // ✅ First: confirm connection works BEFORE applying SQL
+    await safeQuery("Connection test (SELECT 1)", "SELECT 1 AS ok");
+    await safeQuery("Server version", "SELECT version()");
 
-    // 2) Execute SQL
-    console.log("⚙️ Applying schema/seed SQL (transactional)...");
-    await runSql(schemaSQL);
-    console.log("✅ Database schema/seed applied successfully");
+    // ✅ Load your SQL
+    const sqlText = readSqlFile("sample.sql");
+    console.log("📄 Loaded backend/database/sample.sql");
 
-    // 3) PostGIS check
+    console.log("⚙️ Applying schema/seed SQL (transactional, simple mode)...");
+    await runSqlTransactional(sqlText);
+    console.log("✅ Schema/seed applied successfully");
+
     await safeQuery("PostGIS version", "SELECT PostGIS_Version() as version");
+    await safeQuery(
+      "users table exists?",
+      "SELECT to_regclass('public.users') AS users_table"
+    );
+    await safeQuery(
+      "plots table exists?",
+      "SELECT to_regclass('public.plots') AS plots_table"
+    );
 
-    // 4) Bounds function check (optional)
-    await safeQuery("Cemetery bounds", "SELECT * FROM get_cemetery_bounds()");
-
-    // 5) Plot count check (optional)
-    await safeQuery("Total plots", "SELECT COUNT(*)::int as total FROM plots");
+    // Counts (will fail gracefully if tables don't exist)
+    await safeQuery("Total users", "SELECT COUNT(*)::int AS total FROM users");
+    await safeQuery("Total plots", "SELECT COUNT(*)::int AS total FROM plots");
 
     console.log("🎉 Cemetery database initialization complete!");
     process.exitCode = 0;
   } catch (error) {
     console.error("❌ Database initialization error:");
-    console.error(error);
+    console.error(error?.message || error);
+
+    console.error(
+      "\n🔎 If you still see 'invalid message format', it is almost always:\n" +
+        "1) Wrong DB URL (internal URL used from your local PC)\n" +
+        "2) SSL mismatch (connecting with SSL to a non-SSL/proxy port or vice versa)\n" +
+        "3) You copied an endpoint that is not actually Postgres\n"
+    );
+
     process.exitCode = 1;
   } finally {
-    // Always close pool
     await pool.end();
     console.log("🔌 Pool closed.");
   }
 }
 
-// Execute
 initializeDatabase();
