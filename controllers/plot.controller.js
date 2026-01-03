@@ -35,12 +35,24 @@ function buildFilters(req) {
 }
 
 /* =========================================================================================
-   Column type detection (cached)
-   We MUST avoid calling jsonb_* functions on geometry columns because Postgres type-checks
-   all branches at plan time.
+   Table + Column detection (cached)
+   IMPORTANT: Avoid calling jsonb_* functions on geometry columns.
 ========================================================================================= */
 
 const _colTypeCache = new Map();
+const _tableExistsCache = new Map();
+
+async function tableExists(table) {
+  const key = String(table);
+  if (_tableExistsCache.has(key)) return _tableExistsCache.get(key);
+
+  const { rows } = await pool.query(`SELECT to_regclass($1) AS reg;`, [
+    `public.${key}`,
+  ]);
+  const ok = Boolean(rows?.[0]?.reg);
+  _tableExistsCache.set(key, ok);
+  return ok;
+}
 
 /**
  * Returns { data_type, udt_name } for a column, or null if missing.
@@ -206,6 +218,11 @@ async function getPlotsGeoJSON(req, res, next) {
   const { whereSQL, params } = buildFilters(req);
 
   try {
+    // If plots table missing, return empty instead of crashing
+    if (!(await tableExists("plots"))) {
+      return res.json({ type: "FeatureCollection", features: [] });
+    }
+
     const baseGeom = await buildBaseGeomExpr("plots", [
       "geom",
       "plot_boundary",
@@ -261,9 +278,7 @@ async function getPlotsGeoJSON(req, res, next) {
     `;
 
     const { rows } = await pool.query(sql, params);
-    return res.json(
-      rows[0]?.geojson ?? { type: "FeatureCollection", features: [] }
-    );
+    return res.json(rows[0]?.geojson ?? { type: "FeatureCollection", features: [] });
   } catch (err) {
     next(err);
   }
@@ -276,6 +291,10 @@ async function getPlotById(req, res, next) {
   const isNumeric = /^\d+$/.test(raw);
 
   try {
+    if (!(await tableExists("plots"))) {
+      return res.status(404).json({ ok: false, error: "Plot not found" });
+    }
+
     const baseGeom = await buildBaseGeomExpr("plots", [
       "geom",
       "plot_boundary",
@@ -327,21 +346,30 @@ async function getPlotById(req, res, next) {
    FACTORIES (ROAD/BUILDING)
 ========================================================================================= */
 
+const ALLOWED_TABLES = new Set(["road_plots", "building_plots"]);
+
 function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
+  const safeTable = ALLOWED_TABLES.has(table) ? table : null;
+
   return async (req, res, next) => {
+    if (!safeTable) return res.status(500).json({ error: "Invalid table config" });
+
     const { whereSQL, params } = buildFilters(req);
 
     try {
-      const baseGeom = await buildBaseGeomExpr(table, [
-        "geom", // in case your road/building tables ever have geom
+      // If table missing on Render (common), return empty instead of 500
+      if (!(await tableExists(safeTable))) {
+        return res.json({ type: "FeatureCollection", features: [] });
+      }
+
+      const baseGeom = await buildBaseGeomExpr(safeTable, [
+        "geom",
         "plot_boundary",
         "coordinates",
       ]);
 
       const geomExpr =
-        geomMode === "line"
-          ? sqlGeomAsLine(baseGeom)
-          : sqlGeomAsPolygon(baseGeom);
+        geomMode === "line" ? sqlGeomAsLine(baseGeom) : sqlGeomAsPolygon(baseGeom);
 
       const sql = `
         WITH base AS (
@@ -357,7 +385,7 @@ function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
             created_at,
             updated_at,
             ${geomExpr} AS geom
-          FROM ${table}
+          FROM ${safeTable}
           ${whereSQL}
         ),
         feats AS (
@@ -392,9 +420,7 @@ function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
       `;
 
       const { rows } = await pool.query(sql, params);
-      return res.json(
-        rows[0]?.geojson ?? { type: "FeatureCollection", features: [] }
-      );
+      return res.json(rows[0]?.geojson ?? { type: "FeatureCollection", features: [] });
     } catch (err) {
       next(err);
     }
@@ -402,24 +428,29 @@ function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
 }
 
 function makeGetPlotById(table, geomMode = "polygon") {
+  const safeTable = ALLOWED_TABLES.has(table) ? table : null;
+
   return async (req, res, next) => {
+    if (!safeTable) return res.status(500).json({ error: "Invalid table config" });
+
     const raw = String(req.params.id || "").trim();
-    if (!raw)
-      return res.status(400).json({ ok: false, error: "Invalid plot id" });
+    if (!raw) return res.status(400).json({ ok: false, error: "Invalid plot id" });
 
     const isNumeric = /^\d+$/.test(raw);
 
     try {
-      const baseGeom = await buildBaseGeomExpr(table, [
+      if (!(await tableExists(safeTable))) {
+        return res.status(404).json({ ok: false, error: "Plot not found" });
+      }
+
+      const baseGeom = await buildBaseGeomExpr(safeTable, [
         "geom",
         "plot_boundary",
         "coordinates",
       ]);
 
       const geomExpr =
-        geomMode === "line"
-          ? sqlGeomAsLine(baseGeom)
-          : sqlGeomAsPolygon(baseGeom);
+        geomMode === "line" ? sqlGeomAsLine(baseGeom) : sqlGeomAsPolygon(baseGeom);
 
       const sql = `
         SELECT json_build_object(
@@ -440,7 +471,7 @@ function makeGetPlotById(table, geomMode = "polygon") {
             'updated_at', updated_at
           )
         ) AS feature
-        FROM ${table}
+        FROM ${safeTable}
         WHERE ${
           isNumeric
             ? "id = $1"
