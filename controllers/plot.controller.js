@@ -1,4 +1,6 @@
 // backend/controllers/plot.controller.js
+"use strict";
+
 const pool = require("../config/database");
 
 /**
@@ -33,10 +35,81 @@ function buildFilters(req) {
 }
 
 /**
+ * ✅ KEY FIX:
+ * Your columns like plot_boundary / coordinates may be JSONB (not geometry).
+ * This builds a safe SQL expression that returns a PostGIS geometry.
+ *
+ * Supported inputs:
+ * - geometry: returned as-is
+ * - geography: cast to geometry
+ * - jsonb:
+ *   - GeoJSON object: {"type":"Polygon",...} -> ST_GeomFromGeoJSON
+ *   - coordinate array polygon: [[[lng,lat]...]] -> wrap as GeoJSON Polygon
+ *   - coordinate array point: [lng,lat] -> ST_MakePoint
+ *   - object lat/lng: {"lat":..,"lng":..} -> ST_MakePoint
+ */
+function sqlToGeometry(expr, { defaultSrid = 4326 } = {}) {
+  return `
+    CASE
+      WHEN ${expr} IS NULL THEN NULL
+
+      -- already geometry
+      WHEN pg_typeof(${expr}) = 'geometry'::regtype THEN ${expr}
+
+      -- geography -> geometry
+      WHEN pg_typeof(${expr}) = 'geography'::regtype THEN ${expr}::geometry
+
+      -- jsonb -> geometry
+      WHEN pg_typeof(${expr}) = 'jsonb'::regtype THEN
+        CASE
+          WHEN jsonb_typeof(${expr}) = 'object' AND (${expr} ? 'type') THEN
+            ST_SetSRID(ST_GeomFromGeoJSON(${expr}::text), ${defaultSrid})
+
+          WHEN jsonb_typeof(${expr}) = 'object' AND (${expr} ? 'lat') AND (${expr} ? 'lng') THEN
+            ST_SetSRID(
+              ST_MakePoint((${expr}->>'lng')::double precision, (${expr}->>'lat')::double precision),
+              ${defaultSrid}
+            )
+
+          WHEN jsonb_typeof(${expr}) = 'object' AND (${expr} ? 'latitude') AND (${expr} ? 'longitude') THEN
+            ST_SetSRID(
+              ST_MakePoint((${expr}->>'longitude')::double precision, (${expr}->>'latitude')::double precision),
+              ${defaultSrid}
+            )
+
+          WHEN jsonb_typeof(${expr}) = 'array'
+               AND jsonb_array_length(${expr}) = 2 THEN
+            -- treat as [lng, lat]
+            ST_SetSRID(
+              ST_MakePoint((${expr}->>0)::double precision, (${expr}->>1)::double precision),
+              ${defaultSrid}
+            )
+
+          WHEN jsonb_typeof(${expr}) = 'array' THEN
+            -- treat as polygon coordinates [[[lng,lat]...]]
+            ST_SetSRID(
+              ST_GeomFromGeoJSON(
+                jsonb_build_object('type','Polygon','coordinates', ${expr})::text
+              ),
+              ${defaultSrid}
+            )
+
+          ELSE NULL
+        END
+
+      -- text -> attempt GeoJSON
+      WHEN pg_typeof(${expr}) = 'text'::regtype THEN
+        ST_SetSRID(ST_GeomFromGeoJSON(${expr}), ${defaultSrid})
+
+      ELSE NULL
+    END
+  `;
+}
+
+/**
  * Utility: ensures polygon output for graves/plots on the map.
- * - If plot_boundary exists -> use it
- * - Else use coordinates (for older schema)
- * - If that is POINT -> buffer it to polygon
+ * - If geometry is polygon -> use it
+ * - If point/line -> buffer it to polygon
  */
 function sqlGeomAsPolygon(geomExpr) {
   return `
@@ -52,9 +125,9 @@ function sqlGeomAsPolygon(geomExpr) {
 
 /**
  * Utility: ensures line output for roads.
- * - If boundary is polygon -> boundary(line)
+ * - If polygon -> boundary(line)
  * - If already line -> as-is
- * - If point -> null (roads shouldn’t be points)
+ * - If point -> null
  */
 function sqlGeomAsLine(geomExpr) {
   return `
@@ -73,12 +146,18 @@ async function getPlotsGeoJSON(req, res, next) {
   const { whereSQL, params } = buildFilters(req);
 
   try {
+    // ✅ IMPORTANT: convert each column to geometry FIRST, then COALESCE.
+    const baseGeom = `COALESCE(
+      ${sqlToGeometry("geom")},
+      ${sqlToGeometry("plot_boundary")},
+      ${sqlToGeometry("coordinates")}
+    )`;
+
     const sql = `
       WITH base AS (
         SELECT
           id,
           uid,
-          -- tolerate schemas: plot_name vs plot_code
           COALESCE(plot_name::text, plot_code::text) AS plot_name,
           plot_type,
           section_name,
@@ -87,7 +166,7 @@ async function getPlotsGeoJSON(req, res, next) {
           status,
           created_at,
           updated_at,
-          ${sqlGeomAsPolygon("COALESCE(plot_boundary, coordinates)")} AS geom
+          ${sqlGeomAsPolygon(baseGeom)} AS geom
         FROM plots
         ${whereSQL}
       ),
@@ -136,11 +215,17 @@ async function getPlotById(req, res, next) {
   const isNumeric = /^\d+$/.test(raw);
 
   try {
+    const baseGeom = `COALESCE(
+      ${sqlToGeometry("geom")},
+      ${sqlToGeometry("plot_boundary")},
+      ${sqlToGeometry("coordinates")}
+    )`;
+
     const sql = `
       SELECT json_build_object(
         'type','Feature',
         'id', id,
-        'geometry', ST_AsGeoJSON(${sqlGeomAsPolygon("COALESCE(plot_boundary, coordinates)")})::json,
+        'geometry', ST_AsGeoJSON(${sqlGeomAsPolygon(baseGeom)})::json,
         'properties', json_build_object(
           'id', id,
           'uid', uid,
@@ -179,10 +264,16 @@ function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
   return async (req, res, next) => {
     const { whereSQL, params } = buildFilters(req);
 
+    // road_plots/building_plots usually don't have geom column; handle boundary/coords safely
+    const baseGeom = `COALESCE(
+      ${sqlToGeometry("plot_boundary")},
+      ${sqlToGeometry("coordinates")}
+    )`;
+
     const geomExpr =
       geomMode === "line"
-        ? sqlGeomAsLine("COALESCE(plot_boundary, coordinates)")
-        : sqlGeomAsPolygon("COALESCE(plot_boundary, coordinates)");
+        ? sqlGeomAsLine(baseGeom)
+        : sqlGeomAsPolygon(baseGeom);
 
     try {
       const sql = `
@@ -248,10 +339,15 @@ function makeGetPlotById(table, geomMode = "polygon") {
 
     const isNumeric = /^\d+$/.test(raw);
 
+    const baseGeom = `COALESCE(
+      ${sqlToGeometry("plot_boundary")},
+      ${sqlToGeometry("coordinates")}
+    )`;
+
     const geomExpr =
       geomMode === "line"
-        ? sqlGeomAsLine("COALESCE(plot_boundary, coordinates)")
-        : sqlGeomAsPolygon("COALESCE(plot_boundary, coordinates)");
+        ? sqlGeomAsLine(baseGeom)
+        : sqlGeomAsPolygon(baseGeom);
 
     try {
       const sql = `
