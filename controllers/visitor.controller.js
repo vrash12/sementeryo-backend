@@ -1,4 +1,6 @@
 // backend/controllers/visitor.controller.js
+"use strict";
+
 const pool = require("../config/database");
 const path = require("path");
 const fs = require("fs");
@@ -8,6 +10,19 @@ const multer = require("multer");
  * NOTE:
  * ✅ Search-by-name here DOES NOT use g.deceased_name.
  * It searches by plots.person_full_name.
+ *
+ * ✅ Panel suggestion support (Burial/Schedule module):
+ * - Visitor submits the deceased info via burial_requests (this file: createBurialRequest)
+ * - Admin should NOT re-type; admin should SELECT the details already submitted by the visitor
+ *   (your admin UI can read from burial_requests and use those fields to create a schedule/grave record).
+ *
+ * ✅ Added in this version:
+ * - Death Certificate upload for BURIAL REQUESTS
+ *   POST /api/visitor/burial-requests/:id/death-certificate
+ *   (stores URL to burial_requests.death_certificate_url if column exists)
+ *
+ * Make sure you serve uploads in server.js:
+ *   app.use("/uploads", express.static(path.join(__dirname, "uploads")));
  */
 
 function sendBadRequest(res, message = "Invalid request") {
@@ -58,6 +73,35 @@ const uploadReceipt = multer({
   fileFilter: receiptFileFilter,
   limits: { fileSize: 8 * 1024 * 1024 },
 }).single("receipt");
+
+// =============================== Upload: death certificates (BURIAL REQUEST) ===============================
+const deathCertDir = path.join(__dirname, "..", "uploads", "death-certificates");
+if (!fs.existsSync(deathCertDir)) fs.mkdirSync(deathCertDir, { recursive: true });
+
+const deathCertStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, deathCertDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    const safeExt = ext || "";
+    const rid = String(req.params?.id || "burial").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const name = `deathcert_${rid}_${Date.now()}_${Math.round(Math.random() * 1e9)}${safeExt}`;
+    cb(null, name);
+  },
+});
+
+function deathCertFileFilter(_req, file, cb) {
+  const allowed = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+  if (!allowed.includes(file.mimetype)) {
+    return cb(new Error("Invalid file type. Only JPG/PNG/WEBP/PDF allowed."));
+  }
+  cb(null, true);
+}
+
+const uploadDeathCertificate = multer({
+  storage: deathCertStorage,
+  fileFilter: deathCertFileFilter,
+  limits: { fileSize: 12 * 1024 * 1024 }, // 12MB
+}).single("death_certificate");
 
 // =============================== QR parsing helpers ===============================
 function extractQrObject(qrToken) {
@@ -245,7 +289,8 @@ async function getMyDeceasedNames(req, res) {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
-    const toSet = (rows) => new Set((rows || []).map((r) => String(r.column_name || "").toLowerCase()));
+    const toSet = (rows) =>
+      new Set((rows || []).map((r) => String(r.column_name || "").toLowerCase()));
 
     async function tableExists(regclassText) {
       const r = await pool.query(`SELECT to_regclass($1) AS reg;`, [regclassText]);
@@ -274,10 +319,7 @@ async function getMyDeceasedNames(req, res) {
       const nameCol = pickFirst(cols, ["deceased_name", "person_full_name", "full_name", "name"]);
       const famCol = pickFirst(cols, ["family_contact", "familycontact", "user_id", "userid"]);
       const plotCol = pickFirst(cols, ["plot_id", "plotid", "grave_plot_id", "graveplotid"]);
-
-      if (nameCol && famCol) {
-        sources.push({ table: "maintenance_requests", nameCol, famCol, plotCol });
-      }
+      if (nameCol && famCol) sources.push({ table: "maintenance_requests", nameCol, famCol, plotCol });
     }
 
     if (await tableExists("public.burial_requests")) {
@@ -285,10 +327,7 @@ async function getMyDeceasedNames(req, res) {
       const nameCol = pickFirst(cols, ["deceased_name", "person_full_name", "full_name", "name"]);
       const famCol = pickFirst(cols, ["family_contact", "familycontact", "user_id", "userid"]);
       const plotCol = pickFirst(cols, ["plot_id", "plotid", "grave_plot_id", "graveplotid"]);
-
-      if (nameCol && famCol) {
-        sources.push({ table: "burial_requests", nameCol, famCol, plotCol });
-      }
+      if (nameCol && famCol) sources.push({ table: "burial_requests", nameCol, famCol, plotCol });
     }
 
     if (await tableExists("public.plots")) {
@@ -296,15 +335,10 @@ async function getMyDeceasedNames(req, res) {
       const nameCol = pickFirst(cols, ["person_full_name", "deceased_name", "full_name", "name"]);
       const famCol = pickFirst(cols, ["family_contact", "familycontact", "user_id", "userid"]);
       const idCol = pickFirst(cols, ["id"]);
-
-      if (nameCol && famCol && idCol) {
-        sources.push({ table: "plots", nameCol, famCol, plotCol: "id" });
-      }
+      if (nameCol && famCol && idCol) sources.push({ table: "plots", nameCol, famCol, plotCol: "id" });
     }
 
-    if (!sources.length) {
-      return res.json({ success: true, data: [] });
-    }
+    if (!sources.length) return res.json({ success: true, data: [] });
 
     const parts = sources.map((s) => {
       const plotSel = s.plotCol ? `"${s.plotCol}"::text AS plot_id` : `NULL::text AS plot_id`;
@@ -360,8 +394,7 @@ async function createBurialRequest(req, res) {
     if (!hasPlotId) {
       return res.status(400).json({
         success: false,
-        message:
-          "burial_requests.plot_id column is missing. Please add plot_id column.",
+        message: "burial_requests.plot_id column is missing. Please add plot_id column.",
       });
     }
 
@@ -385,7 +418,8 @@ async function createBurialRequest(req, res) {
     if (!approved.rows.length) {
       return res.status(409).json({
         success: false,
-        message: "No approved reservation found. Please wait for admin approval before submitting a burial request.",
+        message:
+          "No approved reservation found. Please wait for admin approval before submitting a burial request.",
       });
     }
 
@@ -456,6 +490,85 @@ async function createBurialRequest(req, res) {
     return res.status(201).json({ success: true, data: rows[0] });
   } catch (err) {
     console.error("createBurialRequest error:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+}
+
+/**
+ * ✅ NEW: Upload death certificate for a burial request
+ * Field name: death_certificate
+ * Saves file: backend/uploads/death-certificates/...
+ * Stores URL: burial_requests.death_certificate_url
+ */
+async function uploadBurialRequestDeathCertificate(req, res) {
+  try {
+    const { id } = req.params;
+    if (!id) return sendBadRequest(res, "Burial request id is required");
+
+    const user_id = req.user?.id;
+    if (!user_id) return res.status(401).json({ success: false, message: "Unauthorized" });
+
+    const hasCol = await hasColumn("burial_requests", "death_certificate_url");
+    if (!hasCol) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "burial_requests.death_certificate_url column is missing. Add it first:\n" +
+          "ALTER TABLE burial_requests ADD COLUMN IF NOT EXISTS death_certificate_url TEXT;",
+      });
+    }
+
+    uploadDeathCertificate(req, res, async (err) => {
+      if (err) return res.status(400).json({ success: false, message: err.message || "Upload error" });
+      if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded (death_certificate)" });
+
+      // fetch request
+      const cur = await pool.query(`SELECT * FROM burial_requests WHERE id = $1 LIMIT 1`, [id]);
+      if (!cur.rows.length) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(404).json({ success: false, message: "Burial request not found" });
+      }
+
+      const row = cur.rows[0];
+
+      // visitor can only upload for their own request
+      const role = String(req.user?.role || "").toLowerCase();
+      if (role === "visitor" && String(row.family_contact) !== String(user_id)) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(403).json({ success: false, message: "Forbidden" });
+      }
+
+      // delete old file (optional)
+      const oldUrl = String(row.death_certificate_url || "").trim();
+      if (oldUrl) {
+        const oldName = oldUrl.split("/").pop();
+        if (oldName) {
+          const oldPath = path.join(deathCertDir, oldName);
+          try { if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath); } catch {}
+        }
+      }
+
+      const fileUrl = `/uploads/death-certificates/${req.file.filename}`;
+
+      const upd = await pool.query(
+        `
+        UPDATE burial_requests
+        SET death_certificate_url = $2,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *;
+        `,
+        [id, fileUrl]
+      );
+
+      return res.json({
+        success: true,
+        message: "Death certificate uploaded.",
+        data: upd.rows[0],
+      });
+    });
+  } catch (e) {
+    console.error("uploadBurialRequestDeathCertificate error:", e);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 }
@@ -767,7 +880,9 @@ async function reservePlot(req, res) {
     );
     if (dup.rows.length) {
       await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, message: "You already have an active reservation for this plot." });
+      return res
+        .status(409)
+        .json({ success: false, message: "You already have an active reservation for this plot." });
     }
 
     const insertResSql = `
@@ -785,7 +900,9 @@ async function reservePlot(req, res) {
       data: resRows[0],
     });
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch {}
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
     console.error("reservePlot error:", err);
     return res.status(500).json({ success: false, message: "Server error processing reservation" });
   } finally {
@@ -835,9 +952,7 @@ async function cancelReservation(req, res) {
 
     if (rows.length === 0) {
       await client.query("ROLLBACK");
-      return res
-        .status(404)
-        .json({ success: false, message: "Reservation not found or access denied" });
+      return res.status(404).json({ success: false, message: "Reservation not found or access denied" });
     }
 
     const reservation = rows[0];
@@ -847,15 +962,10 @@ async function cancelReservation(req, res) {
       return res.status(400).json({ success: false, message: "Already cancelled" });
     }
 
-    await client.query(
-      `UPDATE plot_reservations SET status = 'cancelled', updated_at = NOW() WHERE id = $1`,
-      [id]
-    );
+    await client.query(`UPDATE plot_reservations SET status = 'cancelled', updated_at = NOW() WHERE id = $1`, [id]);
 
     // ✅ Only release plot if it was actually locked (reserved) and no other active approved reservation exists
-    const plotRow = await client.query(`SELECT status FROM plots WHERE id = $1 FOR UPDATE`, [
-      reservation.plot_id,
-    ]);
+    const plotRow = await client.query(`SELECT status FROM plots WHERE id = $1 FOR UPDATE`, [reservation.plot_id]);
     const plotStatus = String(plotRow.rows?.[0]?.status || "").toLowerCase();
 
     if (plotStatus === "reserved") {
@@ -872,16 +982,16 @@ async function cancelReservation(req, res) {
       const activeCnt = active.rows?.[0]?.cnt || 0;
 
       if (activeCnt === 0) {
-        await client.query(`UPDATE plots SET status = 'available', updated_at = NOW() WHERE id = $1`, [
-          reservation.plot_id,
-        ]);
+        await client.query(`UPDATE plots SET status = 'available', updated_at = NOW() WHERE id = $1`, [reservation.plot_id]);
       }
     }
 
     await client.query("COMMIT");
     return res.json({ success: true, message: "Reservation cancelled" });
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch {}
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
     console.error("cancelReservation error:", err);
     return res.status(500).json({ success: false, message: "Server error" });
   } finally {
@@ -894,20 +1004,12 @@ async function uploadReservationReceipt(req, res) {
     const reservationId = req.params.id;
     const user_id = req.user?.id;
 
-    if (!reservationId) {
-      return res.status(400).json({ success: false, message: "Reservation ID is required" });
-    }
-    if (!user_id) {
-      return res.status(401).json({ success: false, message: "Unauthorized" });
-    }
+    if (!reservationId) return res.status(400).json({ success: false, message: "Reservation ID is required" });
+    if (!user_id) return res.status(401).json({ success: false, message: "Unauthorized" });
 
     uploadReceipt(req, res, async (err) => {
-      if (err) {
-        return res.status(400).json({ success: false, message: err.message || "Upload error" });
-      }
-      if (!req.file) {
-        return res.status(400).json({ success: false, message: "No file uploaded (receipt)" });
-      }
+      if (err) return res.status(400).json({ success: false, message: err.message || "Upload error" });
+      if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded (receipt)" });
 
       const checkSql = `SELECT * FROM plot_reservations WHERE id = $1 AND user_id = $2`;
       const check = await pool.query(checkSql, [reservationId, user_id]);
@@ -915,9 +1017,7 @@ async function uploadReservationReceipt(req, res) {
       // cleanup uploaded file if reservation not found
       if (check.rows.length === 0) {
         try { fs.unlinkSync(req.file.path); } catch {}
-        return res
-          .status(404)
-          .json({ success: false, message: "Reservation not found or access denied" });
+        return res.status(404).json({ success: false, message: "Reservation not found or access denied" });
       }
 
       const reservation = check.rows[0];
@@ -933,7 +1033,7 @@ async function uploadReservationReceipt(req, res) {
         });
       }
 
-      // 🚫 if already accepted, block replacing receipt (optional but safer)
+      // 🚫 if already accepted, block replacing receipt
       if (payStatus === "accepted") {
         try { fs.unlinkSync(req.file.path); } catch {}
         return res.status(409).json({
@@ -1036,35 +1136,21 @@ async function approveReservationAsAdmin(req, res) {
 
     if (["rejected", "cancelled", "canceled", "completed"].includes(current)) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: `Cannot approve a ${current} reservation`,
-      });
+      return res.status(409).json({ success: false, message: `Cannot approve a ${current} reservation` });
     }
 
-    // ✅ NEW: REQUIRE receipt BEFORE approval
+    // ✅ REQUIRE receipt BEFORE approval
     const receiptUrl = String(reservation.payment_receipt_url || "").trim();
     const payStatus = String(reservation.payment_status || "").toLowerCase();
-
     if (!receiptUrl) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: "Cannot approve reservation: no receipt uploaded yet.",
-      });
+      return res.status(409).json({ success: false, message: "Cannot approve reservation: no receipt uploaded yet." });
     }
-
-    // optional: also require payment_status to be submitted/accepted
-    // (if your DB always has payment_status, keep this enabled)
     if (payStatus && !["submitted", "accepted"].includes(payStatus)) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: "Cannot approve reservation: receipt is not submitted/valid yet.",
-      });
+      return res.status(409).json({ success: false, message: "Cannot approve reservation: receipt is not submitted/valid yet." });
     }
 
-    // lock plot row
     const pSql = `SELECT id, status FROM plots WHERE id = $1 FOR UPDATE`;
     const pRes = await client.query(pSql, [reservation.plot_id]);
     if (!pRes.rows.length) {
@@ -1075,13 +1161,9 @@ async function approveReservationAsAdmin(req, res) {
     const plotStatus = String(pRes.rows[0].status || "").toLowerCase();
     if (plotStatus === "occupied" || plotStatus === "reserved") {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: `Cannot approve: plot is locked (${pRes.rows[0].status}).`,
-      });
+      return res.status(409).json({ success: false, message: `Cannot approve: plot is locked (${pRes.rows[0].status}).` });
     }
 
-    // approve reservation
     const updSql = `
       UPDATE plot_reservations
       SET status = 'approved', updated_at = NOW()
@@ -1091,11 +1173,9 @@ async function approveReservationAsAdmin(req, res) {
     const upd = await client.query(updSql, [id]);
 
     // ✅ LOCK plot ONLY on approval
-    await client.query(`UPDATE plots SET status = 'reserved', updated_at = NOW() WHERE id = $1`, [
-      reservation.plot_id,
-    ]);
+    await client.query(`UPDATE plots SET status = 'reserved', updated_at = NOW() WHERE id = $1`, [reservation.plot_id]);
 
-    // ✅ Optional: reject other pending reservations for same plot
+    // reject other pending reservations for same plot
     await client.query(
       `
       UPDATE plot_reservations
@@ -1110,16 +1190,13 @@ async function approveReservationAsAdmin(req, res) {
     await client.query("COMMIT");
     return res.json({ success: true, message: "Reservation approved", data: upd.rows[0] });
   } catch (err) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {}
+    try { await client.query("ROLLBACK"); } catch {}
     console.error("approveReservationAsAdmin error:", err);
     return res.status(500).json({ success: false, message: "Server error" });
   } finally {
     client.release();
   }
 }
-
 
 async function rejectReservationAsAdmin(req, res) {
   const client = await pool.connect();
@@ -1148,10 +1225,7 @@ async function rejectReservationAsAdmin(req, res) {
 
     if (current === "cancelled" || current === "canceled") {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: `Cannot reject a ${current} reservation`,
-      });
+      return res.status(409).json({ success: false, message: `Cannot reject a ${current} reservation` });
     }
 
     const pSql = `SELECT id, status FROM plots WHERE id = $1 FOR UPDATE`;
@@ -1180,9 +1254,7 @@ async function rejectReservationAsAdmin(req, res) {
     const activeCnt = active.rows?.[0]?.cnt || 0;
 
     if (activeCnt === 0) {
-      await client.query(`UPDATE plots SET status = 'available', updated_at = NOW() WHERE id = $1`, [
-        reservation.plot_id,
-      ]);
+      await client.query(`UPDATE plots SET status = 'available', updated_at = NOW() WHERE id = $1`, [reservation.plot_id]);
     }
 
     await client.query("COMMIT");
@@ -1247,9 +1319,7 @@ async function cancelReservationAsAdmin(req, res) {
     const activeCnt = active.rows?.[0]?.cnt || 0;
 
     if (activeCnt === 0) {
-      await client.query(`UPDATE plots SET status = 'available', updated_at = NOW() WHERE id = $1`, [
-        reservation.plot_id,
-      ]);
+      await client.query(`UPDATE plots SET status = 'available', updated_at = NOW() WHERE id = $1`, [reservation.plot_id]);
     }
 
     await client.query("COMMIT");
@@ -1280,9 +1350,7 @@ async function acceptPaymentAsAdmin(req, res) {
       RETURNING *;
     `;
     const { rows } = await pool.query(sql, [id]);
-    if (!rows.length) {
-      return res.status(404).json({ success: false, message: "Reservation not found" });
-    }
+    if (!rows.length) return res.status(404).json({ success: false, message: "Reservation not found" });
 
     return res.json({ success: true, message: "Payment accepted", data: rows[0] });
   } catch (err) {
@@ -1308,9 +1376,7 @@ async function rejectPaymentAsAdmin(req, res) {
       RETURNING *;
     `;
     const { rows } = await pool.query(sql, [id]);
-    if (!rows.length) {
-      return res.status(404).json({ success: false, message: "Reservation not found" });
-    }
+    if (!rows.length) return res.status(404).json({ success: false, message: "Reservation not found" });
 
     return res.json({ success: true, message: "Payment rejected", data: rows[0] });
   } catch (err) {
@@ -1369,9 +1435,7 @@ async function hasTable(tableName) {
   const key = String(tableName);
   if (_hasTableCache.has(key)) return _hasTableCache.get(key);
 
-  const { rows } = await pool.query(`SELECT to_regclass($1) AS reg;`, [
-    `public.${String(tableName)}`,
-  ]);
+  const { rows } = await pool.query(`SELECT to_regclass($1) AS reg;`, [`public.${String(tableName)}`]);
 
   const ok = Boolean(rows?.[0]?.reg);
   _hasTableCache.set(key, ok);
@@ -1504,8 +1568,11 @@ module.exports = {
   // visitor search
   getBurialRecords,
 
-  // requests
+  // burial request + death cert upload
   createBurialRequest,
+  uploadBurialRequestDeathCertificate,
+
+  // maintenance requests
   createMaintenanceRequest,
   getMyDeceasedNames,
   getBurialRequests,
