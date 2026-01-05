@@ -144,15 +144,10 @@ router.get("/visitor-users", allowAdminStaff, adminController.getVisitorUsers);
 // ✅ keep old alias (if you used it before)
 router.get("/users/visitors", allowAdminStaff, adminController.getVisitorUsers);
 
-/* =========================================================================================
-   ✅ RESERVATIONS (matches BurialPlots.jsx)
-   Frontend calls:
-   GET   /api/admin/reservations
-   PATCH /api/admin/cancel-reservation/:id
-   PATCH /api/admin/reservations/:id/validate-payment
-   PATCH /api/admin/reservations/:id/approve-payment
-   PATCH /api/admin/reservations/:id/reject
-========================================================================================= */
+router.get("/visitors", admin.getVisitorUsers);
+router.post("/visitors", admin.addVisitorUser);
+router.put("/visitors/:id", admin.updateVisitorUser);
+router.delete("/visitors/:id", admin.deleteVisitorUser);
 
 // admin/staff create reservation (optional)
 router.post("/reserve-plot", allowAdminStaff, adminReservation.reservePlotAsAdmin);
