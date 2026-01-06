@@ -1,4 +1,3 @@
-// backend/routes/admin.routes.js
 "use strict";
 
 const express = require("express");
@@ -12,14 +11,14 @@ const { verifyToken, requireRole } = require("../middleware/auth");
 
 const adminController = require("../controllers/admin.controller");
 
-// NOTE: keep this require path matching your project file name.
+// NOTE: Keep this require path matching your project file name.
 const adminReservation = require("../controllers/adminReservation.controller");
 const adminMaintenance = require("../controllers/adminMaintenance.controller");
 
-// ✅ all /admin routes require auth
+// ✅ All /admin routes require auth
 router.use(verifyToken);
 
-// ✅ admin + staff access
+// ✅ Admin + staff access
 const allowAdminStaff = requireRole(["admin", "staff"]);
 const adminOnly = requireRole(["admin"]);
 
@@ -62,50 +61,50 @@ const upload = multer({
    ✅ ROUTES
 ========================================================================================= */
 
-/* --- dashboard --- */
+/* --- Dashboard --- */
 router.get("/metrics", allowAdminStaff, adminController.dashboardMetrics);
 
-/* --- maintenance --- */
+/* --- Maintenance --- */
 router.get("/maintenance-requests", allowAdminStaff, adminMaintenance.getMaintenanceRequests);
 
 router.patch("/maintenance/:id/schedule", allowAdminStaff, adminMaintenance.scheduleMaintenance);
 
 router.patch("/maintenance/:id/complete", allowAdminStaff, adminMaintenance.completeMaintenance);
 
-/* --- plots --- */
+/* --- Plots --- */
 router.post("/add-plot", allowAdminStaff, adminController.addPlots);
 router.put("/edit-plot", allowAdminStaff, adminController.editPlots);
 router.delete("/delete-plot/:id", allowAdminStaff, adminController.deletePlots);
 
-// ✅ used by frontend: GET /api/admin/plot/:idOrUid
+// ✅ Used by frontend: GET /api/admin/plot/:idOrUid
 router.get("/plot/:id", allowAdminStaff, adminController.getPlotDetails);
 
-// ✅ used by frontend: POST /api/admin/plot/:id/photo
+// ✅ Used by frontend: POST /api/admin/plot/:id/photo
 router.post("/plot/:id/photo", allowAdminStaff, upload.single("photo"), adminController.uploadPlotPhoto);
 
-/* --- building plots --- */
+/* --- Building Plots --- */
 router.post("/add-building-plot", allowAdminStaff, adminController.addBuildingPlots);
 router.put("/edit-building-plot", allowAdminStaff, adminController.editBuildingPlots);
 router.delete("/delete-building-plot/:id", allowAdminStaff, adminController.deleteBuildingPlots);
 
-/* --- burial records (graves) --- */
+/* --- Burial Records (Graves) --- */
 router.get("/burial-records", allowAdminStaff, adminController.getBurialRecords);
 router.post("/burial-records", adminOnly, adminController.addBurialRecord);
 router.patch("/burial-records/:id", adminOnly, adminController.editBurialRecord);
 router.delete("/burial-records/:id", adminOnly, adminController.deleteBurialRecord);
 
-/* ✅ OPTIONAL: keep old endpoints as aliases */
+/* ✅ OPTIONAL: Keep old endpoints as aliases */
 router.get("/graves", allowAdminStaff, adminController.getBurialRecords);
 router.post("/graves", adminOnly, adminController.addBurialRecord);
 router.post("/edit-burial-record", adminOnly, adminController.editBurialRecord);
 router.delete("/delete-burial-record/:id", adminOnly, adminController.deleteBurialRecord);
 router.patch("/burial-records", adminOnly, adminController.editBurialRecord);
 
-/* --- users --- */
-// ✅ matches your frontend: GET /api/admin/visitor-users
+/* --- Users --- */
+// ✅ Matches your frontend: GET /api/admin/visitor-users
 router.get("/visitor-users", allowAdminStaff, adminController.getVisitorUsers);
 
-// ✅ keep old alias (if you used it before)
+// ✅ Keep old alias (if you used it before)
 router.get("/users/visitors", allowAdminStaff, adminController.getVisitorUsers);
 
 // ✅ FIXED: admin -> adminController
@@ -115,7 +114,7 @@ router.post("/visitors", adminOnly, adminController.addVisitorUser);
 router.put("/visitors/:id", adminOnly, adminController.updateVisitorUser);
 router.delete("/visitors/:id", adminOnly, adminController.deleteVisitorUser);
 
-/* --- reservations --- */
+/* --- Reservations --- */
 router.post("/reserve-plot", allowAdminStaff, adminReservation.reservePlotAsAdmin);
 router.get("/reservations", allowAdminStaff, adminReservation.getAllReservations);
 
@@ -123,15 +122,12 @@ router.patch("/cancel-reservation/:id", allowAdminStaff, adminReservation.cancel
 
 router.patch("/reservations/:id/reject", allowAdminStaff, adminReservation.rejectReservationAsAdmin);
 
-router.patch("/reservations/:id/validate-payment", allowAdminStaff, adminReservation.validatePaymentAsAdmin);
+// ✅ Approve reservation (No payment fields)
+router.patch("/reservations/:id/approve", allowAdminStaff, adminReservation.approveReservationAsAdmin);
 
-router.patch("/reservations/:id/approve-payment", allowAdminStaff, adminReservation.approvePaymentAsAdmin);
-
-// ✅ keep old endpoint as alias
-router.patch("/reservations/:id/approve", allowAdminStaff, adminReservation.approvePaymentAsAdmin);
-
+// ✅ Keep old endpoint as alias
 router.patch("/reservations/:id/approve-reservation", allowAdminStaff, (req, res, next) => {
-  const fn = adminReservation.approveReservationAsAdmin || adminReservation.approvePaymentAsAdmin;
+  const fn = adminReservation.approveReservationAsAdmin;
   return fn(req, res, next);
 });
 
