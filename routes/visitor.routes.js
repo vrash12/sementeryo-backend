@@ -70,7 +70,7 @@ router.get("/dashboard-stats", allowVisitor, getDashboardStats);
 router.post("/reserve-plot", allowVisitor, reservePlot);
 router.get("/my-reservations", allowVisitor, getMyReservations);
 router.patch("/cancel-reservation/:id", allowVisitor, cancelReservation);
-router.post("/reservations/:id/upload-receipt", allowVisitor, uploadReservationReceipt);
+
 
 /* --- ✅ maintenance schedule extras --- */
 router.get("/my-maintenance-schedule/:family_contact", allowVisitor, getMyMaintenanceSchedule);
