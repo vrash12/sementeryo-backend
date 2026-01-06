@@ -1264,6 +1264,240 @@ async function getPlotDetails(req, res, next) {
   }
 }
 
+// ===== USERS CRUD (Admin/Staff only) =====
+
+// Try bcryptjs first (no native deps), fallback to bcrypt
+let bcrypt = null;
+try {
+  bcrypt = require("bcryptjs");
+} catch {
+  try {
+    bcrypt = require("bcrypt");
+  } catch {
+    bcrypt = null;
+  }
+}
+
+async function resolvePasswordHashColumn() {
+  if (await hasColumn("users", "password_hash")) return "password_hash";
+  if (await hasColumn("users", "password")) return "password";
+  if (await hasColumn("users", "password_digest")) return "password_digest";
+  return null;
+}
+
+async function resolvePasswordPlainColumn() {
+  if (await hasColumn("users", "password_str")) return "password_str";
+  if (await hasColumn("users", "password_plain")) return "password_plain";
+  return null;
+}
+
+async function addVisitorUser(req, res, next) {
+  try {
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
+
+    const {
+      username,
+      email,
+      first_name,
+      last_name,
+      phone,
+      address,
+      is_active,
+      password_str,
+    } = req.body || {};
+
+    const u = String(username || "").trim();
+    const e = String(email || "").trim();
+    const fn = String(first_name || "").trim();
+    const ln = String(last_name || "").trim();
+    const pwd = String(password_str || "").trim();
+
+    if (!u || !e || !fn || !ln || !pwd) {
+      return res.status(400).json({
+        error: "username, email, first_name, last_name, and password_str are required",
+      });
+    }
+
+    // prevent duplicates
+    const dup = await pool.query(
+      `SELECT 1 FROM users WHERE LOWER(username)=LOWER($1) OR LOWER(email)=LOWER($2) LIMIT 1`,
+      [u, e]
+    );
+    if (dup.rows.length) return res.status(409).json({ error: "Username or email already exists." });
+
+    const role = "visitor";
+    const active = typeof is_active === "undefined" ? 1 : Number(is_active) ? 1 : 0;
+
+    const hashCol = await resolvePasswordHashColumn();
+    const plainCol = await resolvePasswordPlainColumn();
+
+    let hashed = null;
+    if (hashCol) {
+      if (!bcrypt) {
+        return res.status(500).json({
+          error:
+            "Password hashing column exists but bcrypt is not installed. Install bcryptjs or bcrypt.",
+        });
+      }
+      hashed = await bcrypt.hash(pwd, 10);
+    }
+
+    // Build dynamic INSERT safely
+    const cols = ["username", "email", "first_name", "last_name", "phone", "address", "role", "is_active", "created_at", "updated_at"];
+    const params = [];
+    const placeholders = [];
+
+    const push = (v) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+
+    placeholders.push(
+      push(u),
+      push(e),
+      push(fn),
+      push(ln),
+      push(phone ? String(phone).trim() : null),
+      push(address ? String(address).trim() : null),
+      push(role),
+      push(active),
+      "NOW()",
+      "NOW()"
+    );
+
+    if (hashCol) {
+      cols.push(hashCol);
+      placeholders.push(push(hashed));
+    }
+    if (plainCol) {
+      cols.push(plainCol);
+      placeholders.push(push(pwd));
+    }
+
+    const sql = `
+      INSERT INTO users (${cols.join(", ")})
+      VALUES (${placeholders.join(", ")})
+      RETURNING id, username, email, first_name, last_name, phone, address, is_active, role
+      ${plainCol ? `, ${plainCol}` : ""}
+    `;
+
+    const out = await pool.query(sql, params);
+    return res.status(201).json({ ok: true, data: out.rows[0] });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateVisitorUser(req, res, next) {
+  try {
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
+
+    const id = req.params?.id;
+    if (!id) return res.status(400).json({ error: "Missing user id." });
+
+    const {
+      username,
+      email,
+      first_name,
+      last_name,
+      phone,
+      address,
+      is_active,
+      password_str, // optional
+    } = req.body || {};
+
+    // only allow updates on visitors
+    const exists = await pool.query(
+      `SELECT id FROM users WHERE id::text=$1 AND role='visitor' LIMIT 1`,
+      [String(id)]
+    );
+    if (!exists.rows.length) return res.status(404).json({ error: "Visitor not found." });
+
+    const sets = [];
+    const params = [];
+    let i = 1;
+
+    const addSet = (col, val) => {
+      if (typeof val !== "undefined") {
+        sets.push(`${col} = $${i++}`);
+        params.push(val);
+      }
+    };
+
+    if (typeof username !== "undefined") addSet("username", String(username).trim() || null);
+    if (typeof email !== "undefined") addSet("email", String(email).trim() || null);
+    if (typeof first_name !== "undefined") addSet("first_name", String(first_name).trim() || null);
+    if (typeof last_name !== "undefined") addSet("last_name", String(last_name).trim() || null);
+    if (typeof phone !== "undefined") addSet("phone", String(phone).trim() || null);
+    if (typeof address !== "undefined") addSet("address", String(address).trim() || null);
+    if (typeof is_active !== "undefined") addSet("is_active", Number(is_active) ? 1 : 0);
+
+    const hashCol = await resolvePasswordHashColumn();
+    const plainCol = await resolvePasswordPlainColumn();
+
+    if (typeof password_str !== "undefined" && String(password_str).trim()) {
+      const pwd = String(password_str).trim();
+
+      if (hashCol) {
+        if (!bcrypt) {
+          return res.status(500).json({
+            error:
+              "Password hashing column exists but bcrypt is not installed. Install bcryptjs or bcrypt.",
+          });
+        }
+        const hashed = await bcrypt.hash(pwd, 10);
+        addSet(hashCol, hashed);
+      }
+      if (plainCol) addSet(plainCol, pwd);
+    }
+
+    sets.push(`updated_at = NOW()`);
+
+    const sql = `
+      UPDATE users
+      SET ${sets.join(", ")}
+      WHERE id::text = $${i} AND role='visitor'
+      RETURNING id, username, email, first_name, last_name, phone, address, is_active, role
+      ${plainCol ? `, ${plainCol}` : ""}
+    `;
+    params.push(String(id));
+
+    const out = await pool.query(sql, params);
+    return res.json({ ok: true, data: out.rows[0] });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function deleteVisitorUser(req, res, next) {
+  try {
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
+
+    const id = req.params?.id;
+    if (!id) return res.status(400).json({ error: "Missing user id." });
+
+    const del = await pool.query(
+      `DELETE FROM users WHERE id::text=$1 AND role='visitor' RETURNING id`,
+      [String(id)]
+    );
+
+    if (!del.rows.length) return res.status(404).json({ error: "Visitor not found." });
+
+    return res.json({ ok: true, deleted_id: del.rows[0].id });
+  } catch (err) {
+    // FK constraint (example: user referenced by graves, etc.)
+    if (err && err.code === "23503") {
+      return res.status(409).json({
+        error: "Cannot delete user: referenced by other records.",
+        code: "FK_CONSTRAINT",
+      });
+    }
+    next(err);
+  }
+}
+
+
+
 module.exports = {
   dashboardMetrics,
 
@@ -1294,5 +1528,8 @@ module.exports = {
   uploadPlotPhoto,
 
   // ✅ users
-  getVisitorUsers,
+ getVisitorUsers,
+  addVisitorUser,
+  updateVisitorUser,
+  deleteVisitorUser,
 };

@@ -34,123 +34,6 @@ function buildFilters(req) {
   };
 }
 
-/* =========================================================================================
-   Column type detection (cached)
-   We MUST avoid calling jsonb_* functions on geometry columns because Postgres type-checks
-   all branches at plan time.
-========================================================================================= */
-
-const _colTypeCache = new Map();
-
-/**
- * Returns { data_type, udt_name } for a column, or null if missing.
- * - geometry/geography appear as data_type='USER-DEFINED', udt_name='geometry'|'geography'
- * - jsonb appears as data_type='jsonb', udt_name='jsonb'
- */
-async function getColumnType(table, column) {
-  const key = `${String(table)}.${String(column)}`;
-  if (_colTypeCache.has(key)) return _colTypeCache.get(key);
-
-  const { rows } = await pool.query(
-    `
-    SELECT data_type, udt_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = $1
-      AND column_name = $2
-    LIMIT 1
-    `,
-    [String(table), String(column)]
-  );
-
-  const out = rows[0]
-    ? { data_type: rows[0].data_type, udt_name: rows[0].udt_name }
-    : null;
-
-  _colTypeCache.set(key, out);
-  return out;
-}
-
-/* =========================================================================================
-   Geometry conversion helpers
-========================================================================================= */
-
-function sqlToGeometryFromJsonb(expr, { defaultSrid = 4326 } = {}) {
-  // expr MUST be jsonb here
-  return `
-    CASE
-      WHEN ${expr} IS NULL THEN NULL
-
-      -- GeoJSON object: {"type":"Polygon",...}
-      WHEN jsonb_typeof(${expr}) = 'object' AND (${expr} ? 'type') THEN
-        ST_SetSRID(ST_GeomFromGeoJSON(${expr}::text), ${defaultSrid})
-
-      -- object lat/lng: {"lat":..,"lng":..}
-      WHEN jsonb_typeof(${expr}) = 'object' AND (${expr} ? 'lat') AND (${expr} ? 'lng') THEN
-        ST_SetSRID(
-          ST_MakePoint((${expr}->>'lng')::double precision, (${expr}->>'lat')::double precision),
-          ${defaultSrid}
-        )
-
-      -- object latitude/longitude
-      WHEN jsonb_typeof(${expr}) = 'object' AND (${expr} ? 'latitude') AND (${expr} ? 'longitude') THEN
-        ST_SetSRID(
-          ST_MakePoint((${expr}->>'longitude')::double precision, (${expr}->>'latitude')::double precision),
-          ${defaultSrid}
-        )
-
-      -- array [lng, lat]
-      WHEN jsonb_typeof(${expr}) = 'array'
-           AND jsonb_array_length(${expr}) = 2 THEN
-        ST_SetSRID(
-          ST_MakePoint((${expr}->>0)::double precision, (${expr}->>1)::double precision),
-          ${defaultSrid}
-        )
-
-      -- polygon coords [[[lng,lat]...]]
-      WHEN jsonb_typeof(${expr}) = 'array' THEN
-        ST_SetSRID(
-          ST_GeomFromGeoJSON(
-            jsonb_build_object('type','Polygon','coordinates', ${expr})::text
-          ),
-          ${defaultSrid}
-        )
-
-      ELSE NULL
-    END
-  `;
-}
-
-function sqlToGeometryFromText(expr, { defaultSrid = 4326 } = {}) {
-  // expr is text/varchar containing GeoJSON string
-  return `ST_SetSRID(ST_GeomFromGeoJSON(${expr}), ${defaultSrid})`;
-}
-
-/**
- * Build a SAFE SQL expression that returns a PostGIS geometry for a given column.
- * We only emit jsonb_* calls if the column is actually jsonb (checked via information_schema).
- */
-async function sqlColumnToGeometry(table, column, { defaultSrid = 4326 } = {}) {
-  const t = await getColumnType(table, column);
-  if (!t) return null;
-
-  const udt = String(t.udt_name || "").toLowerCase();
-  const dt = String(t.data_type || "").toLowerCase();
-
-  if (udt === "geometry") return column;
-  if (udt === "geography") return `${column}::geometry`;
-
-  if (udt === "jsonb" || dt === "jsonb") {
-    return sqlToGeometryFromJsonb(column, { defaultSrid });
-  }
-
-  if (dt === "text" || dt === "character varying" || dt === "varchar") {
-    return sqlToGeometryFromText(column, { defaultSrid });
-  }
-
-  return null;
-}
-
 /**
  * Utility: ensures polygon output for graves/plots on the map.
  * - If geometry is polygon -> use it
@@ -206,12 +89,6 @@ async function getPlotsGeoJSON(req, res, next) {
   const { whereSQL, params } = buildFilters(req);
 
   try {
-    const baseGeom = await buildBaseGeomExpr("plots", [
-      "geom",
-      "plot_boundary",
-      "coordinates",
-    ]);
-
     const sql = `
       WITH base AS (
         SELECT
@@ -276,12 +153,6 @@ async function getPlotById(req, res, next) {
   const isNumeric = /^\d+$/.test(raw);
 
   try {
-    const baseGeom = await buildBaseGeomExpr("plots", [
-      "geom",
-      "plot_boundary",
-      "coordinates",
-    ]);
-
     const sql = `
       SELECT json_build_object(
         'type','Feature',
@@ -323,26 +194,22 @@ async function getPlotById(req, res, next) {
   }
 }
 
-/* =========================================================================================
-   FACTORIES (ROAD/BUILDING)
-========================================================================================= */
+/* ---------------- FACTORIES (ROAD/BUILDING) ---------------- */
 
 function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
+  const safeTable = ALLOWED_TABLES.has(table) ? table : null;
+
   return async (req, res, next) => {
+    if (!safeTable) return res.status(500).json({ error: "Invalid table config" });
+
     const { whereSQL, params } = buildFilters(req);
 
+    const geomExpr =
+      geomMode === "line"
+        ? sqlGeomAsLine("COALESCE(plot_boundary, coordinates)")
+        : sqlGeomAsPolygon("COALESCE(plot_boundary, coordinates)");
+
     try {
-      const baseGeom = await buildBaseGeomExpr(table, [
-        "geom", // in case your road/building tables ever have geom
-        "plot_boundary",
-        "coordinates",
-      ]);
-
-      const geomExpr =
-        geomMode === "line"
-          ? sqlGeomAsLine(baseGeom)
-          : sqlGeomAsPolygon(baseGeom);
-
       const sql = `
         WITH base AS (
           SELECT
@@ -357,7 +224,7 @@ function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
             created_at,
             updated_at,
             ${geomExpr} AS geom
-          FROM ${table}
+          FROM ${safeTable}
           ${whereSQL}
         ),
         feats AS (
@@ -402,25 +269,23 @@ function makeGetPlotsGeoJSON(table, geomMode = "polygon") {
 }
 
 function makeGetPlotById(table, geomMode = "polygon") {
+  const safeTable = ALLOWED_TABLES.has(table) ? table : null;
+
   return async (req, res, next) => {
+    if (!safeTable) return res.status(500).json({ error: "Invalid table config" });
+
     const raw = String(req.params.id || "").trim();
     if (!raw)
       return res.status(400).json({ ok: false, error: "Invalid plot id" });
 
     const isNumeric = /^\d+$/.test(raw);
 
+    const geomExpr =
+      geomMode === "line"
+        ? sqlGeomAsLine("COALESCE(plot_boundary, coordinates)")
+        : sqlGeomAsPolygon("COALESCE(plot_boundary, coordinates)");
+
     try {
-      const baseGeom = await buildBaseGeomExpr(table, [
-        "geom",
-        "plot_boundary",
-        "coordinates",
-      ]);
-
-      const geomExpr =
-        geomMode === "line"
-          ? sqlGeomAsLine(baseGeom)
-          : sqlGeomAsPolygon(baseGeom);
-
       const sql = `
         SELECT json_build_object(
           'type','Feature',
@@ -441,11 +306,7 @@ function makeGetPlotById(table, geomMode = "polygon") {
           )
         ) AS feature
         FROM ${table}
-        WHERE ${
-          isNumeric
-            ? "id = $1"
-            : "(uid::text = $1 OR plot_code::text = $1 OR plot_name::text = $1)"
-        }
+        WHERE ${isNumeric ? "id = $1" : "(uid::text = $1 OR plot_code::text = $1 OR plot_name::text = $1)"}
         LIMIT 1;
       `;
 
