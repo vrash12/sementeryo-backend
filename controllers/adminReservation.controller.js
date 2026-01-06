@@ -1,34 +1,9 @@
+// backend/controllers/adminReservation.controller.js
 "use strict";
+
 
 const pool = require("../config/database");
 
-/**
- * ✅ NO PAYMENT VERSION
- *
- * This controller removes ALL payment functionality:
- * - No payment_status usage
- * - No validate-payment endpoint
- * - No approve-payment endpoint
- * - No receipt handling
- *
- * Reservation flow here:
- * - Admin creates reservation, status = 'pending'
- * - Plot becomes 'reserved' immediately
- * - Admin can approve reservation, status = 'approved'
- * - Admin can reject reservation, status = 'rejected'
- * - Admin can cancel reservation, status = 'cancelled'
- *
- * Optional DB cleanup (ONLY if you want to remove old columns):
- * ALTER TABLE plot_reservations
- *   DROP COLUMN IF EXISTS payment_status,
- *   DROP COLUMN IF EXISTS payment_validated_at,
- *   DROP COLUMN IF EXISTS payment_validated_by,
- *   DROP COLUMN IF EXISTS payment_approved_at,
- *   DROP COLUMN IF EXISTS payment_approved_by,
- *   DROP COLUMN IF EXISTS payment_notes,
- *   DROP COLUMN IF EXISTS payment_receipt_url,
- *   DROP COLUMN IF EXISTS payment_uploaded_at;
- */
 
 function isPrivileged(user) {
   const role = String(user?.role || "").toLowerCase();

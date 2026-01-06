@@ -1,3 +1,4 @@
+// backend/routes/admin.routes.js
 "use strict";
 
 const express = require("express");
@@ -124,6 +125,9 @@ router.patch("/reservations/:id/reject", allowAdminStaff, adminReservation.rejec
 
 // ✅ Approve reservation (No payment fields)
 router.patch("/reservations/:id/approve", allowAdminStaff, adminReservation.approveReservationAsAdmin);
+
+// ✅ Alias for approve-payment
+router.patch("/reservations/:id/approve-payment", allowAdminStaff, adminReservation.approveReservationAsAdmin);
 
 // ✅ Keep old endpoint as alias
 router.patch("/reservations/:id/approve-reservation", allowAdminStaff, (req, res, next) => {
