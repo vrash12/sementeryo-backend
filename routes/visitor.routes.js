@@ -65,12 +65,6 @@ router.patch(
   visitorController.cancelReservation
 );
 
-/* --- ✅ NO RECEIPT: submit payment (marks payment_status=submitted) --- */
-router.patch(
-  "/reservations/:id/submit-payment",
-  allowVisitor,
-  visitorController.submitPaymentAsVisitor
-);
 
 /* --- ✅ maintenance schedule extras --- */
 router.get(
