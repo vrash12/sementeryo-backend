@@ -1,7 +1,13 @@
-// backend/controllers/plot.controller.js
 "use strict";
 
 const pool = require("../config/database");
+
+const ALLOWED_TABLES = new Set([
+  "plots",
+  "road_plots",
+  "building_plots",
+  // Add other table names that should be allowed for queries
+]);
 
 /**
  * Utility: build a WHERE clause safely for optional filters.
@@ -40,7 +46,7 @@ function buildFilters(req) {
  * - If point/line -> buffer it to polygon
  */
 function sqlGeomAsPolygon(geomExpr) {
-  return `
+  return `  
     CASE
       WHEN ${geomExpr} IS NULL THEN NULL
       WHEN GeometryType(${geomExpr}) IN ('POLYGON','MULTIPOLYGON') THEN ${geomExpr}
@@ -58,7 +64,7 @@ function sqlGeomAsPolygon(geomExpr) {
  * - If point -> null
  */
 function sqlGeomAsLine(geomExpr) {
-  return `
+  return `  
     CASE
       WHEN ${geomExpr} IS NULL THEN NULL
       WHEN GeometryType(${geomExpr}) IN ('LINESTRING','MULTILINESTRING') THEN ${geomExpr}
@@ -333,10 +339,6 @@ const getRoadPlotById = makeGetPlotById("road_plots", "line");
 
 const getBuildingPlotsGeoJSON = makeGetPlotsGeoJSON("building_plots", "polygon");
 const getBuildingPlotById = makeGetPlotById("building_plots", "polygon");
-
-/* =========================================================================================
-   EXPORTS
-========================================================================================= */
 
 module.exports = {
   getPlotsGeoJSON,
