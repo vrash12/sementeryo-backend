@@ -5,20 +5,21 @@ const pool = require("../config/database");
 /**
  * ✅ REQUIRED DB COLUMNS (run once in Postgres)
  *
+ * NOTE: This version is "WITHOUT RECEIPT".
+ * No payment_receipt_url, no payment_uploaded_at, and no receipt checks.
+ *
  * -- If your users.id is UUID, set payment_validated_by/payment_approved_by to UUID instead of TEXT.
  *
  * ALTER TABLE plot_reservations
- *   ADD COLUMN IF NOT EXISTS payment_receipt_url TEXT,
  *   ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'unpaid',
- *   ADD COLUMN IF NOT EXISTS payment_uploaded_at TIMESTAMPTZ,
  *   ADD COLUMN IF NOT EXISTS payment_validated_at TIMESTAMPTZ,
  *   ADD COLUMN IF NOT EXISTS payment_validated_by TEXT,
  *   ADD COLUMN IF NOT EXISTS payment_approved_at TIMESTAMPTZ,
  *   ADD COLUMN IF NOT EXISTS payment_approved_by TEXT,
  *   ADD COLUMN IF NOT EXISTS payment_notes TEXT;
  *
- * -- Optional: keep payment_status clean
- * -- (you can enforce with a CHECK, but not required)
+ * -- Optional: keep payment_status clean with a CHECK constraint if you want
+ * -- (not required)
  */
 
 function isPrivileged(user) {
@@ -34,18 +35,10 @@ function requirePrivileged(req, res) {
   return true;
 }
 
-
-function pickName(first, last) {
-  const f = String(first || "").trim();
-  const l = String(last || "").trim();
-  const full = `${f} ${l}`.trim();
-  return full || null;
-}
-
 /**
  * ✅ Admin creates a reservation (status = pending)
  * - plot becomes reserved immediately (same as your current behavior)
- * - payment_status starts as 'unpaid' (or whatever default you set)
+ * - payment_status starts as 'unpaid'
  */
 async function reservePlotAsAdmin(req, res, next) {
   const client = await pool.connect();
@@ -58,6 +51,7 @@ async function reservePlotAsAdmin(req, res, next) {
 
     await client.query("BEGIN");
 
+    // Verify visitor user exists and is a visitor
     const v = await client.query(
       `SELECT id, role FROM users WHERE id::text = $1 LIMIT 1`,
       [String(visitor_user_id)]
@@ -71,6 +65,7 @@ async function reservePlotAsAdmin(req, res, next) {
       return res.status(400).json({ error: "visitor_user_id must be a visitor" });
     }
 
+    // Lock plot row
     const p = await client.query(
       `SELECT id, status, plot_name, uid FROM plots WHERE id::text = $1 FOR UPDATE`,
       [String(plot_id)]
@@ -87,13 +82,17 @@ async function reservePlotAsAdmin(req, res, next) {
       return res.status(409).json({ error: `Plot is currently ${plot.status}` });
     }
 
+    // Create reservation
     const ins = await client.query(
-      `INSERT INTO plot_reservations (plot_id, user_id, status, notes, payment_status)
-       VALUES ($1, $2, 'pending', $3, COALESCE($4, 'unpaid'))
-       RETURNING *;`,
-      [String(plot_id), String(visitor_user_id), notes || null, "unpaid"]
+      `
+      INSERT INTO plot_reservations (plot_id, user_id, status, notes, payment_status)
+      VALUES ($1, $2, 'pending', $3, 'unpaid')
+      RETURNING *;
+      `,
+      [String(plot_id), String(visitor_user_id), notes || null]
     );
 
+    // Reserve plot immediately
     await client.query(
       `UPDATE plots SET status = 'reserved', updated_at = NOW() WHERE id::text = $1`,
       [String(plot_id)]
@@ -119,7 +118,7 @@ async function reservePlotAsAdmin(req, res, next) {
 }
 
 /**
- * ✅ Admin list: includes plot + visitor info + payment fields (aliases match your frontend)
+ * ✅ Admin list: includes plot + visitor info + payment fields
  */
 async function getAllReservations(req, res, next) {
   try {
@@ -149,18 +148,27 @@ async function getAllReservations(req, res, next) {
     next(err);
   }
 }
+
+/**
+ * ✅ Admin marks payment as "validated"
+ * No receipt required.
+ */
 async function validatePaymentAsAdmin(req, res) {
   try {
     if (!requirePrivileged(req, res)) return;
 
     const { id } = req.params;
+    const { payment_notes } = req.body || {};
+
     if (!id) return res.status(400).json({ success: false, message: "Reservation ID required" });
 
     const cur = await pool.query(
-      `SELECT id, status, payment_receipt_url, payment_status
-       FROM plot_reservations
-       WHERE id::text = $1
-       LIMIT 1`,
+      `
+      SELECT id, status, payment_status
+      FROM plot_reservations
+      WHERE id::text = $1
+      LIMIT 1
+      `,
       [String(id)]
     );
 
@@ -170,19 +178,11 @@ async function validatePaymentAsAdmin(req, res) {
 
     const row = cur.rows[0];
     const status = String(row.status || "").toLowerCase();
-    const receiptUrl = String(row.payment_receipt_url || "").trim();
 
     if (["rejected", "cancelled", "canceled", "completed"].includes(status)) {
       return res.status(409).json({
         success: false,
         message: `Cannot validate payment: reservation is ${status}.`,
-      });
-    }
-
-    if (!receiptUrl) {
-      return res.status(409).json({
-        success: false,
-        message: "Cannot validate payment: no receipt uploaded.",
       });
     }
 
@@ -194,11 +194,12 @@ async function validatePaymentAsAdmin(req, res) {
       SET payment_status = 'validated',
           payment_validated_at = NOW(),
           payment_validated_by = $2,
+          payment_notes = COALESCE($3, payment_notes),
           updated_at = NOW()
       WHERE id::text = $1
       RETURNING *;
       `,
-      [String(id), validatorId]
+      [String(id), validatorId, payment_notes || null]
     );
 
     return res.json({ success: true, message: "Payment validated", data: upd.rows[0] });
@@ -208,18 +209,26 @@ async function validatePaymentAsAdmin(req, res) {
   }
 }
 
+/**
+ * ✅ Admin marks payment as "approved"
+ * No receipt required.
+ */
 async function approvePaymentAsAdmin(req, res) {
   try {
     if (!requirePrivileged(req, res)) return;
 
     const { id } = req.params;
+    const { payment_notes } = req.body || {};
+
     if (!id) return res.status(400).json({ success: false, message: "Reservation ID required" });
 
     const cur = await pool.query(
-      `SELECT id, status, payment_receipt_url, payment_status
-       FROM plot_reservations
-       WHERE id::text = $1
-       LIMIT 1`,
+      `
+      SELECT id, status, payment_status
+      FROM plot_reservations
+      WHERE id::text = $1
+      LIMIT 1
+      `,
       [String(id)]
     );
 
@@ -229,27 +238,12 @@ async function approvePaymentAsAdmin(req, res) {
 
     const row = cur.rows[0];
     const status = String(row.status || "").toLowerCase();
-    const receiptUrl = String(row.payment_receipt_url || "").trim();
-    const paymentStatus = String(row.payment_status || "").toLowerCase();
 
     if (["rejected", "cancelled", "canceled", "completed"].includes(status)) {
       return res.status(409).json({
         success: false,
         message: `Cannot approve payment: reservation is ${status}.`,
       });
-    }
-
-    if (!receiptUrl) {
-      return res.status(409).json({
-        success: false,
-        message: "Cannot approve payment: no receipt uploaded.",
-      });
-    }
-
-    // optional guard (your frontend allows validated OR submitted)
-    if (paymentStatus && !["validated", "submitted"].includes(paymentStatus)) {
-      // If you want to enforce the flow, uncomment:
-      // return res.status(409).json({ success:false, message:`Cannot approve from payment_status=${paymentStatus}`});
     }
 
     const approverId = req.user?.id != null ? String(req.user.id) : null;
@@ -260,11 +254,12 @@ async function approvePaymentAsAdmin(req, res) {
       SET payment_status = 'approved',
           payment_approved_at = NOW(),
           payment_approved_by = $2,
+          payment_notes = COALESCE($3, payment_notes),
           updated_at = NOW()
       WHERE id::text = $1
       RETURNING *;
       `,
-      [String(id), approverId]
+      [String(id), approverId, payment_notes || null]
     );
 
     return res.json({ success: true, message: "Payment approved", data: upd.rows[0] });
@@ -310,20 +305,24 @@ async function rejectReservationAsAdmin(req, res, next) {
     }
 
     const upd = await client.query(
-      `UPDATE plot_reservations
-       SET status = 'rejected', updated_at = NOW()
-       WHERE id::text = $1
-       RETURNING *;`,
+      `
+      UPDATE plot_reservations
+      SET status = 'rejected', updated_at = NOW()
+      WHERE id::text = $1
+      RETURNING *;
+      `,
       [String(id)]
     );
 
     const otherActive = await client.query(
-      `SELECT 1
-       FROM plot_reservations
-       WHERE plot_id::text = $1
-         AND id::text <> $2
-         AND status IN ('pending', 'approved')
-       LIMIT 1`,
+      `
+      SELECT 1
+      FROM plot_reservations
+      WHERE plot_id::text = $1
+        AND id::text <> $2
+        AND status IN ('pending', 'approved')
+      LIMIT 1
+      `,
       [String(reservation.plot_id), String(id)]
     );
 
@@ -383,20 +382,24 @@ async function cancelReservationAsAdmin(req, res, next) {
     }
 
     const upd = await client.query(
-      `UPDATE plot_reservations
-       SET status = 'cancelled', updated_at = NOW()
-       WHERE id::text = $1
-       RETURNING *;`,
+      `
+      UPDATE plot_reservations
+      SET status = 'cancelled', updated_at = NOW()
+      WHERE id::text = $1
+      RETURNING *;
+      `,
       [String(id)]
     );
 
     const otherActive = await client.query(
-      `SELECT 1
-       FROM plot_reservations
-       WHERE plot_id::text = $1
-         AND id::text <> $2
-         AND status IN ('pending', 'approved')
-       LIMIT 1`,
+      `
+      SELECT 1
+      FROM plot_reservations
+      WHERE plot_id::text = $1
+        AND id::text <> $2
+        AND status IN ('pending', 'approved')
+      LIMIT 1
+      `,
       [String(reservation.plot_id), String(id)]
     );
 
@@ -420,7 +423,14 @@ async function cancelReservationAsAdmin(req, res, next) {
   }
 }
 
-
+/**
+ * ✅ Approve reservation (WITHOUT RECEIPT)
+ * Rules in this version:
+ * - Reservation must be pending
+ * - Payment must be validated OR approved (your choice)
+ * - Approving reservation sets status=approved and payment_status=approved
+ * - Plot stays reserved
+ */
 async function approveReservationAsAdmin(req, res, next) {
   const client = await pool.connect();
   try {
@@ -448,36 +458,23 @@ async function approveReservationAsAdmin(req, res, next) {
 
     const reservation = r.rows[0];
 
-    // 2) Reservation must still be pending
+    // 2) Must still be pending
     const status = String(reservation.status || "").toLowerCase();
     if (status !== "pending") {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        error: `Reservation is already ${reservation.status}`,
-      });
+      return res.status(409).json({ error: `Reservation is already ${reservation.status}` });
     }
 
-    // 3) Must have receipt
-    const receipt = String(reservation.payment_receipt_url || "").trim();
-    if (!receipt) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        error: "No payment receipt found. Visitor must upload receipt first.",
-      });
-    }
-
-    // 4) Payment must be validated first
+    // 3) Payment must be validated (or already approved)
     const payStatus = String(reservation.payment_status || "unpaid").toLowerCase();
-    if (payStatus !== "validated") {
+    if (!["validated", "approved"].includes(payStatus)) {
       await client.query("ROLLBACK");
       return res.status(409).json({
-        error: `Payment must be validated first. Current payment_status=${
-          reservation.payment_status || "unpaid"
-        }`,
+        error: `Payment must be validated first. Current payment_status=${reservation.payment_status || "unpaid"}`,
       });
     }
 
-    // 5) Lock plot and ensure not occupied
+    // 4) Lock plot and ensure not occupied
     const p = await client.query(
       `SELECT id, status FROM plots WHERE id::text = $1 FOR UPDATE`,
       [String(reservation.plot_id)]
@@ -493,14 +490,16 @@ async function approveReservationAsAdmin(req, res, next) {
       return res.status(409).json({ error: "Plot is already occupied" });
     }
 
-    // 6) Extra safety: no other active reservation on same plot
+    // 5) Extra safety: no other active reservation on same plot
     const otherActive = await client.query(
-      `SELECT 1
-       FROM plot_reservations
-       WHERE plot_id::text = $1
-         AND id::text <> $2
-         AND status IN ('pending', 'approved')
-       LIMIT 1`,
+      `
+      SELECT 1
+      FROM plot_reservations
+      WHERE plot_id::text = $1
+        AND id::text <> $2
+        AND status IN ('pending', 'approved')
+      LIMIT 1
+      `,
       [String(reservation.plot_id), String(id)]
     );
 
@@ -511,22 +510,24 @@ async function approveReservationAsAdmin(req, res, next) {
       });
     }
 
-const upd = await client.query(
-  `
-  UPDATE plot_reservations
-  SET
-    status = 'approved',
-    payment_status = 'approved',
-    payment_approved_at = NOW(),
-    payment_approved_by = $2,
-    notes = COALESCE($3, notes),
-    updated_at = NOW()
-  WHERE id::text = $1
-  RETURNING *;
-  `,
-  [String(id), approverId, notes || null]
-);
-    // Keep plot reserved (your existing behavior)
+    // 6) Approve reservation + approve payment together
+    const upd = await client.query(
+      `
+      UPDATE plot_reservations
+      SET
+        status = 'approved',
+        payment_status = 'approved',
+        payment_approved_at = NOW(),
+        payment_approved_by = $2,
+        notes = COALESCE($3, notes),
+        updated_at = NOW()
+      WHERE id::text = $1
+      RETURNING *;
+      `,
+      [String(id), approverId, notes || null]
+    );
+
+    // Keep plot reserved
     await client.query(
       `UPDATE plots SET status = 'reserved', updated_at = NOW() WHERE id::text = $1`,
       [String(reservation.plot_id)]
@@ -544,17 +545,15 @@ const upd = await client.query(
   }
 }
 
-
 module.exports = {
   reservePlotAsAdmin,
   getAllReservations,
 
-  // ✅ NEW: payment flow
+  // ✅ payment flow (no receipt)
   validatePaymentAsAdmin,
   approvePaymentAsAdmin,
 
   rejectReservationAsAdmin,
   cancelReservationAsAdmin,
-    approveReservationAsAdmin,
- 
+  approveReservationAsAdmin,
 };

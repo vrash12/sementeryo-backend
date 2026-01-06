@@ -13,7 +13,7 @@ const multer = require("multer");
  *
  * ✅ Panel suggestion support (Burial/Schedule module):
  * - Visitor submits the deceased info via burial_requests (this file: createBurialRequest)
- * - Admin should NOT re-type; admin should SELECT the details already submitted by the visitor
+ * - Admin should NOT re-type, admin should SELECT the details already submitted by the visitor
  *   (your admin UI can read from burial_requests and use those fields to create a schedule/grave record).
  *
  * ✅ Added in this version:
@@ -45,34 +45,6 @@ function requireAdmin(req, res) {
   }
   return true;
 }
-
-// =============================== Upload: receipts ===============================
-const receiptsDir = path.join(__dirname, "..", "uploads", "receipts");
-if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir, { recursive: true });
-
-const receiptStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, receiptsDir),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const safeExt = ext || "";
-    const name = `receipt_${Date.now()}_${Math.round(Math.random() * 1e9)}${safeExt}`;
-    cb(null, name);
-  },
-});
-
-function receiptFileFilter(_req, file, cb) {
-  const allowed = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
-  if (!allowed.includes(file.mimetype)) {
-    return cb(new Error("Invalid file type. Only JPG/PNG/WEBP/PDF allowed."));
-  }
-  cb(null, true);
-}
-
-const uploadReceipt = multer({
-  storage: receiptStorage,
-  fileFilter: receiptFileFilter,
-  limits: { fileSize: 8 * 1024 * 1024 },
-}).single("receipt");
 
 // =============================== Upload: death certificates (BURIAL REQUEST) ===============================
 const deathCertDir = path.join(__dirname, "..", "uploads", "death-certificates");
@@ -495,7 +467,7 @@ async function createBurialRequest(req, res) {
 }
 
 /**
- * ✅ NEW: Upload death certificate for a burial request
+ * ✅ Upload death certificate for a burial request
  * Field name: death_certificate
  * Saves file: backend/uploads/death-certificates/...
  * Stores URL: burial_requests.death_certificate_url
@@ -797,7 +769,7 @@ async function getDashboardStats(req, res) {
     const visitorsQuery = pool.query(`SELECT COUNT(*) AS count FROM visit_logs`);
     const gravesQuery = pool.query(`SELECT COUNT(*) AS count FROM plots`);
     const requestsQuery = pool.query(`
-      SELECT 
+      SELECT
         (SELECT COUNT(*) FROM maintenance_requests WHERE status = 'completed') +
         (SELECT COUNT(*) FROM burial_schedules WHERE status = 'completed') AS total
     `);
@@ -836,9 +808,10 @@ async function getDashboardStats(req, res) {
 
 // =============================== Reservations (user) ===============================
 /**
- * ✅ NEW FLOW:
+ * ✅ FLOW:
  * - Pending reservation does NOT lock plot
  * - Plot locks ONLY on admin approval
+ * - No receipt or payment upload in this controller
  */
 async function reservePlot(req, res) {
   const client = await pool.connect();
@@ -916,11 +889,11 @@ async function getMyReservations(req, res) {
     if (!user_id) return res.status(401).json({ success: false, message: "Unauthorized" });
 
     const sql = `
-      SELECT 
-        r.*, 
-        p.plot_code, 
-        p.section_name, 
-        p.price, 
+      SELECT
+        r.*,
+        p.plot_code,
+        p.section_name,
+        p.price,
         p.size_sqm
       FROM plot_reservations r
       JOIN plots p ON r.plot_id = p.id
@@ -999,85 +972,6 @@ async function cancelReservation(req, res) {
   }
 }
 
-async function uploadReservationReceipt(req, res) {
-  try {
-    const reservationId = req.params.id;
-    const user_id = req.user?.id;
-
-    if (!reservationId) return res.status(400).json({ success: false, message: "Reservation ID is required" });
-    if (!user_id) return res.status(401).json({ success: false, message: "Unauthorized" });
-
-    uploadReceipt(req, res, async (err) => {
-      if (err) return res.status(400).json({ success: false, message: err.message || "Upload error" });
-      if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded (receipt)" });
-
-      const checkSql = `SELECT * FROM plot_reservations WHERE id = $1 AND user_id = $2`;
-      const check = await pool.query(checkSql, [reservationId, user_id]);
-
-      // cleanup uploaded file if reservation not found
-      if (check.rows.length === 0) {
-        try { fs.unlinkSync(req.file.path); } catch {}
-        return res.status(404).json({ success: false, message: "Reservation not found or access denied" });
-      }
-
-      const reservation = check.rows[0];
-      const status = String(reservation.status || "").toLowerCase();
-      const payStatus = String(reservation.payment_status || "").toLowerCase();
-
-      // 🚫 disallow uploads for closed states
-      if (["rejected", "cancelled", "canceled", "completed"].includes(status)) {
-        try { fs.unlinkSync(req.file.path); } catch {}
-        return res.status(409).json({
-          success: false,
-          message: `Cannot upload receipt because reservation is ${status}.`,
-        });
-      }
-
-      // 🚫 if already accepted, block replacing receipt
-      if (payStatus === "accepted") {
-        try { fs.unlinkSync(req.file.path); } catch {}
-        return res.status(409).json({
-          success: false,
-          message: "Payment is already accepted. Receipt can no longer be changed.",
-        });
-      }
-
-      // optional: delete old receipt file to avoid orphan files
-      const oldUrl = String(reservation.payment_receipt_url || "").trim();
-      if (oldUrl) {
-        const oldName = oldUrl.split("/").pop();
-        if (oldName) {
-          const oldPath = path.join(receiptsDir, oldName);
-          try { if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath); } catch {}
-        }
-      }
-
-      const receiptUrl = `/uploads/receipts/${req.file.filename}`;
-
-      const updateSql = `
-        UPDATE plot_reservations
-        SET 
-          payment_receipt_url = $1,
-          payment_status = 'submitted',
-          payment_uploaded_at = NOW(),
-          updated_at = NOW()
-        WHERE id = $2 AND user_id = $3
-        RETURNING *;
-      `;
-      const updated = await pool.query(updateSql, [receiptUrl, reservationId, user_id]);
-
-      return res.json({
-        success: true,
-        message: "Receipt uploaded. Waiting for admin approval.",
-        data: updated.rows[0],
-      });
-    });
-  } catch (e) {
-    console.error("uploadReservationReceipt error:", e);
-    return res.status(500).json({ success: false, message: "Server error" });
-  }
-}
-
 // =============================== Admin: reservations ===============================
 async function getReservationsAsAdmin(req, res) {
   try {
@@ -1137,18 +1031,6 @@ async function approveReservationAsAdmin(req, res) {
     if (["rejected", "cancelled", "canceled", "completed"].includes(current)) {
       await client.query("ROLLBACK");
       return res.status(409).json({ success: false, message: `Cannot approve a ${current} reservation` });
-    }
-
-    // ✅ REQUIRE receipt BEFORE approval
-    const receiptUrl = String(reservation.payment_receipt_url || "").trim();
-    const payStatus = String(reservation.payment_status || "").toLowerCase();
-    if (!receiptUrl) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, message: "Cannot approve reservation: no receipt uploaded yet." });
-    }
-    if (payStatus && !["submitted", "accepted"].includes(payStatus)) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, message: "Cannot approve reservation: receipt is not submitted/valid yet." });
     }
 
     const pSql = `SELECT id, status FROM plots WHERE id = $1 FOR UPDATE`;
@@ -1330,58 +1212,6 @@ async function cancelReservationAsAdmin(req, res) {
     return res.status(500).json({ success: false, message: "Server error" });
   } finally {
     client.release();
-  }
-}
-
-async function acceptPaymentAsAdmin(req, res) {
-  try {
-    if (!requireAdmin(req, res)) return;
-
-    const { id } = req.params;
-    if (!id) return sendBadRequest(res, "Reservation ID required");
-
-    const sql = `
-      UPDATE plot_reservations
-      SET
-        payment_status = 'accepted',
-        payment_verified_at = NOW(),
-        updated_at = NOW()
-      WHERE id = $1
-      RETURNING *;
-    `;
-    const { rows } = await pool.query(sql, [id]);
-    if (!rows.length) return res.status(404).json({ success: false, message: "Reservation not found" });
-
-    return res.json({ success: true, message: "Payment accepted", data: rows[0] });
-  } catch (err) {
-    console.error("acceptPaymentAsAdmin error:", err);
-    return res.status(500).json({ success: false, message: "Server error" });
-  }
-}
-
-async function rejectPaymentAsAdmin(req, res) {
-  try {
-    if (!requireAdmin(req, res)) return;
-
-    const { id } = req.params;
-    if (!id) return sendBadRequest(res, "Reservation ID required");
-
-    const sql = `
-      UPDATE plot_reservations
-      SET
-        payment_status = 'rejected',
-        payment_verified_at = NOW(),
-        updated_at = NOW()
-      WHERE id = $1
-      RETURNING *;
-    `;
-    const { rows } = await pool.query(sql, [id]);
-    if (!rows.length) return res.status(404).json({ success: false, message: "Reservation not found" });
-
-    return res.json({ success: true, message: "Payment rejected", data: rows[0] });
-  } catch (err) {
-    console.error("rejectPaymentAsAdmin error:", err);
-    return res.status(500).json({ success: false, message: "Server error" });
   }
 }
 
@@ -1590,15 +1420,12 @@ module.exports = {
   reservePlot,
   getMyReservations,
   cancelReservation,
-  uploadReservationReceipt,
 
   // reservations (admin)
   getReservationsAsAdmin,
   approveReservationAsAdmin,
   rejectReservationAsAdmin,
   cancelReservationAsAdmin,
-  acceptPaymentAsAdmin,
-  rejectPaymentAsAdmin,
 
   // maintenance schedule
   getMyMaintenanceSchedule,

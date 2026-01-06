@@ -1086,8 +1086,9 @@ async function dashboardMetrics(req, res, next) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    // optional tables/columns
+    // tables
     const hasBurialSchedules = await hasTable("burial_schedules");
+    const hasBurialRequests = await hasTable("burial_requests");
     const hasPlotCode = await hasColumn("plots", "plot_code");
 
     const mrHasRequesterId = await hasColumn("maintenance_requests", "requester_id");
@@ -1098,9 +1099,22 @@ async function dashboardMetrics(req, res, next) {
     const uHasUsername = await hasColumn("users", "username");
     const uHasEmail = await hasColumn("users", "email");
 
+    // upcoming limit support
+    const rawLimit = String(req.query?.upcoming_limit ?? "").trim().toLowerCase();
+    let upcomingLimit = 5;
+    if (rawLimit === "all" || rawLimit === "0") {
+      upcomingLimit = null; // no limit
+    } else if (rawLimit) {
+      const n = Number(rawLimit);
+      if (Number.isFinite(n) && n > 0) upcomingLimit = n;
+    }
+
     // ---------- COUNTS ----------
+    // pending burials: prefer burial_schedules, else fallback to burial_requests
     const pendingBurialsExpr = hasBurialSchedules
-      ? `(SELECT COUNT(*) FROM burial_schedules WHERE status = 'pending')`
+      ? `(SELECT COUNT(*) FROM burial_schedules WHERE LOWER(status) = 'pending')`
+      : hasBurialRequests
+      ? `(SELECT COUNT(*) FROM burial_requests WHERE LOWER(status) = 'pending')`
       : `0`;
 
     const countsQuery = `
@@ -1120,12 +1134,17 @@ async function dashboardMetrics(req, res, next) {
       ORDER BY status
     `;
 
-    // ---------- UPCOMING BURIALS (optional) ----------
+    // ---------- UPCOMING BURIALS ----------
+    // Always return plot_code for frontend compatibility
+    const plotCodeSql = hasPlotCode
+      ? `COALESCE(p.plot_code::text, p.plot_name::text) AS plot_code`
+      : `p.plot_name::text AS plot_code`;
+
     let upcomingBurials = { rows: [] };
+
     if (hasBurialSchedules) {
-      const plotLabelSql = hasPlotCode
-        ? `COALESCE(p.plot_code::text, p.plot_name::text) AS plot_label`
-        : `p.plot_name::text AS plot_label`;
+      const limitSql = upcomingLimit ? `LIMIT $1` : ``;
+      const params = upcomingLimit ? [upcomingLimit] : [];
 
       const upcomingBurialsQuery = `
         SELECT
@@ -1135,19 +1154,71 @@ async function dashboardMetrics(req, res, next) {
           bs.scheduled_time,
           bs.burial_type,
           bs.status,
-          ${plotLabelSql}
+          ${plotCodeSql}
         FROM burial_schedules bs
         LEFT JOIN plots p ON bs.plot_id = p.id
-        WHERE bs.scheduled_date >= CURRENT_DATE
-        ORDER BY bs.scheduled_date ASC, bs.scheduled_time ASC
-        LIMIT 5
+        WHERE bs.scheduled_date IS NOT NULL
+          AND bs.scheduled_date >= CURRENT_DATE
+          AND LOWER(COALESCE(bs.status,'')) NOT IN ('cancelled', 'canceled', 'rejected')
+        ORDER BY bs.scheduled_date ASC, bs.scheduled_time ASC NULLS LAST, bs.id ASC
+        ${limitSql}
       `;
-      upcomingBurials = await pool.query(upcomingBurialsQuery);
+
+      upcomingBurials = await pool.query(upcomingBurialsQuery, params);
+    } else if (hasBurialRequests) {
+      // figure out which date column exists
+      const brHasScheduledDate = await hasColumn("burial_requests", "scheduled_date");
+      const brHasBurialDate = await hasColumn("burial_requests", "burial_date");
+      const dateCol = brHasScheduledDate
+        ? "scheduled_date"
+        : brHasBurialDate
+        ? "burial_date"
+        : null;
+
+      // figure out which time column exists
+      const brHasScheduledTime = await hasColumn("burial_requests", "scheduled_time");
+      const brHasBurialTime = await hasColumn("burial_requests", "burial_time");
+      const timeCol = brHasScheduledTime
+        ? "scheduled_time"
+        : brHasBurialTime
+        ? "burial_time"
+        : null;
+
+      const brHasPlotId = await hasColumn("burial_requests", "plot_id");
+
+      if (dateCol) {
+        const limitSql = upcomingLimit ? `LIMIT $1` : ``;
+        const params = upcomingLimit ? [upcomingLimit] : [];
+
+        const timeSelect = timeCol ? `br.${timeCol} AS scheduled_time` : `NULL AS scheduled_time`;
+
+        const joinSql = brHasPlotId
+          ? `LEFT JOIN plots p ON p.id::text = br.plot_id::text`
+          : `LEFT JOIN plots p ON 1=0`;
+
+        const upcomingFromRequestsQuery = `
+          SELECT
+            br.id,
+            br.deceased_name,
+            br.${dateCol} AS scheduled_date,
+            ${timeSelect},
+            NULL::text AS burial_type,
+            br.status,
+            ${plotCodeSql}
+          FROM burial_requests br
+          ${joinSql}
+          WHERE br.${dateCol} IS NOT NULL
+            AND br.${dateCol} >= CURRENT_DATE
+            AND LOWER(COALESCE(br.status,'')) NOT IN ('cancelled', 'canceled', 'rejected')
+          ORDER BY br.${dateCol} ASC, br.id ASC
+          ${limitSql}
+        `;
+
+        upcomingBurials = await pool.query(upcomingFromRequestsQuery, params);
+      }
     }
 
     // ---------- RECENT MAINTENANCE ----------
-    // Build the best possible join key for requester:
-    // Prefer requester_id; fallback to family_contact if requester_id is null/missing.
     let joinKeyExpr = "NULL";
     if (mrHasRequesterId && mrHasFamilyContact) {
       joinKeyExpr = `COALESCE(mr.requester_id::text, mr.family_contact::text)`;
@@ -1157,7 +1228,6 @@ async function dashboardMetrics(req, res, next) {
       joinKeyExpr = `mr.family_contact::text`;
     }
 
-    // Build requester display name safely (no u.full_name usage)
     const namePieces = [];
     if (uHasFirst) namePieces.push(`COALESCE(u.first_name,'')`);
     if (uHasLast) namePieces.push(`COALESCE(u.last_name,'')`);
@@ -1213,7 +1283,6 @@ async function dashboardMetrics(req, res, next) {
     next(err);
   }
 }
-
 
 async function getPlotDetails(req, res, next) {
   try {
