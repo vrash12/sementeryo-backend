@@ -1,4 +1,4 @@
-//backend/routes/visitor.routes.js
+// backend/routes/visitor.routes.js
 "use strict";
 
 const express = require("express");
@@ -6,75 +6,83 @@ const router = express.Router();
 
 const { verifyToken, requireRole } = require("../middleware/auth");
 
-const {
-  // inquiries
-  createBurialRequest,
-  createMaintenanceRequest,
-  getBurialRequests,
-  getMaintenanceRequests,
-  cancelBurialRequest,
-  cancelMaintenanceRequest,
+const visitorController = require("../controllers/visitor.controller");
 
-  // dashboard
-  getDashboardStats,
-
-  // reservations
-  reservePlot,
-  getMyReservations,
-  cancelReservation,
-
-  // deceased/burial records
-  getBurialRecords,
-
-  // deceased names list for dropdown/autofill
-  getMyDeceasedNames,
-
-  // receipt upload
-  uploadReservationReceipt,
-
-  // ✅ maintenance schedule extras
-  getMyMaintenanceSchedule,
-  requestMaintenanceReschedule,
-  submitMaintenanceFeedback,
-} = require("../controllers/visitor.controller");
+const allowVisitor = requireRole(["visitor"]);
 
 /* =========================================================================
    PUBLIC ROUTES (no token)
 ======================================================================== */
-router.get("/burial-records", getBurialRecords);
+router.get("/burial-records", visitorController.getBurialRecords);
 
 /* =========================================================================
    PROTECTED ROUTES
 ======================================================================== */
 router.use(verifyToken);
 
-const allowVisitor = requireRole("visitor");
-
 /* --- deceased names for dropdown --- */
-router.get("/my-deceased-names/:family_contact", allowVisitor, getMyDeceasedNames);
+router.get(
+  "/my-deceased-names/:family_contact",
+  allowVisitor,
+  visitorController.getMyDeceasedNames
+);
 
 /* --- burial request --- */
-router.post("/request-burial", allowVisitor, createBurialRequest);
-router.get("/my-burial-requests/:family_contact", allowVisitor, getBurialRequests);
-router.patch("/request-burial/cancel/:id", allowVisitor, cancelBurialRequest);
+router.post("/request-burial", allowVisitor, visitorController.createBurialRequest);
+router.get(
+  "/my-burial-requests/:family_contact",
+  allowVisitor,
+  visitorController.getBurialRequests
+);
+router.patch(
+  "/request-burial/cancel/:id",
+  allowVisitor,
+  visitorController.cancelBurialRequest
+);
 
 /* --- maintenance request --- */
-router.post("/request-maintenance", allowVisitor, createMaintenanceRequest);
-router.get("/my-maintenance-requests/:family_contact", allowVisitor, getMaintenanceRequests);
-router.patch("/request-maintenance/cancel/:id", allowVisitor, cancelMaintenanceRequest);
+router.post("/request-maintenance", allowVisitor, visitorController.createMaintenanceRequest);
+router.get(
+  "/my-maintenance-requests/:family_contact",
+  allowVisitor,
+  visitorController.getMaintenanceRequests
+);
+router.patch(
+  "/request-maintenance/cancel/:id",
+  allowVisitor,
+  visitorController.cancelMaintenanceRequest
+);
 
 /* --- dashboard --- */
-router.get("/dashboard-stats", allowVisitor, getDashboardStats);
+router.get("/dashboard-stats", allowVisitor, visitorController.getDashboardStats);
 
 /* --- reservations --- */
-router.post("/reserve-plot", allowVisitor, reservePlot);
-router.get("/my-reservations", allowVisitor, getMyReservations);
-router.patch("/cancel-reservation/:id", allowVisitor, cancelReservation);
+router.post("/reserve-plot", allowVisitor, visitorController.reservePlot);
+router.get("/my-reservations", allowVisitor, visitorController.getMyReservations);
+router.patch(
+  "/cancel-reservation/:id",
+  allowVisitor,
+  visitorController.cancelReservation
+);
 
+/* --- ✅ NO RECEIPT: submit payment (marks payment_status=submitted) --- */
+router.patch(
+  "/reservations/:id/submit-payment",
+  allowVisitor,
+  visitorController.submitPaymentAsVisitor
+);
 
 /* --- ✅ maintenance schedule extras --- */
-router.get("/my-maintenance-schedule/:family_contact", allowVisitor, getMyMaintenanceSchedule);
-router.patch("/maintenance/:id/request-reschedule", allowVisitor, requestMaintenanceReschedule);
-router.post("/maintenance/:id/feedback", allowVisitor, submitMaintenanceFeedback);
+router.get(
+  "/my-maintenance-schedule/:family_contact",
+  allowVisitor,
+  visitorController.getMyMaintenanceSchedule
+);
+router.patch(
+  "/maintenance/:id/request-reschedule",
+  allowVisitor,
+  visitorController.requestMaintenanceReschedule
+);
+router.post("/maintenance/:id/feedback", allowVisitor, visitorController.submitMaintenanceFeedback);
 
 module.exports = router;
