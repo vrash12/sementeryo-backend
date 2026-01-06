@@ -4,7 +4,7 @@ const pool = require("../config/database");
 
 function isPrivileged(user) {
   const role = String(user?.role || "").toLowerCase();
-  return role === "admin" || role === "staff" || role === "superadmin";
+  return role === "admin";
 }
 
 /**

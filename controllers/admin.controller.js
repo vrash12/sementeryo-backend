@@ -1284,11 +1284,9 @@ async function dashboardMetrics(req, res, next) {
     next(err);
   }
 }
-
 async function getPlotDetails(req, res, next) {
   try {
-    if (!isPrivileged(req.user))
-      return res.status(403).json({ error: "Forbidden" });
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const identifier = req.params?.id;
     if (!identifier)
@@ -1333,6 +1331,7 @@ async function getPlotDetails(req, res, next) {
     next(err);
   }
 }
+
 
 // ===== USERS CRUD (Admin/Staff only) =====
 
