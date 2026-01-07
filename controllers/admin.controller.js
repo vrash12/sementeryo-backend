@@ -1284,6 +1284,126 @@ async function dashboardMetrics(req, res, next) {
     next(err);
   }
 }
+
+
+/* =========================================================================================
+   ✅ ADMIN: BurialPlots (plots) LIST
+   GET /admin/plots?search=&status=&limit=&offset=&order=asc|desc
+========================================================================================= */
+async function getPlots(req, res, next) {
+  try {
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
+
+    const search = String(req.query?.search ?? req.query?.q ?? "").trim();
+    const status = String(req.query?.status ?? "").trim();
+    const order = String(req.query?.order ?? "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+
+    const limitRaw = req.query?.limit;
+    const offsetRaw = req.query?.offset;
+
+    const limit =
+      limitRaw === undefined || limitRaw === null || String(limitRaw).trim() === ""
+        ? 200
+        : Number(limitRaw);
+
+    const offset =
+      offsetRaw === undefined || offsetRaw === null || String(offsetRaw).trim() === ""
+        ? 0
+        : Number(offsetRaw);
+
+    // Optional columns
+    const extras = [];
+    if (await hasColumn("plots", "photo_url")) extras.push("p.photo_url");
+    if (await hasColumn("plots", "qr_token")) extras.push("p.qr_token");
+    if (await hasColumn("plots", "plot_code")) extras.push("p.plot_code");
+
+    const extraSql = extras.length ? `,\n        ${extras.join(",\n        ")}` : "";
+
+    const where = [];
+    const params = [];
+    let i = 1;
+
+    if (status) {
+      where.push(`LOWER(COALESCE(p.status,'')) = LOWER($${i++})`);
+      params.push(status);
+    }
+
+    if (search) {
+      where.push(`
+        (
+          p.uid ILIKE '%' || $${i} || '%'
+          OR p.plot_name ILIKE '%' || $${i} || '%'
+          OR COALESCE(p.plot_type,'') ILIKE '%' || $${i} || '%'
+          OR COALESCE(p.person_full_name,'') ILIKE '%' || $${i} || '%'
+          OR COALESCE(p.next_of_kin_name,'') ILIKE '%' || $${i} || '%'
+          OR COALESCE(p.contact_phone,'') ILIKE '%' || $${i} || '%'
+          OR COALESCE(p.contact_email,'') ILIKE '%' || $${i} || '%'
+        )
+      `);
+      params.push(search);
+      i++;
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    // Pagination
+    const useLimit = Number.isFinite(limit) && limit > 0;
+    const useOffset = Number.isFinite(offset) && offset >= 0;
+
+    let pageSql = "";
+    if (useLimit) {
+      pageSql += ` LIMIT $${i++}`;
+      params.push(limit);
+      if (useOffset) {
+        pageSql += ` OFFSET $${i++}`;
+        params.push(offset);
+      }
+    }
+
+    const sql = `
+      SELECT
+        p.id::text AS id,
+        p.uid,
+        p.plot_name,
+        p.plot_type,
+        p.size_sqm,
+        p.status,
+        p.price,
+
+        -- personal fields (your plots table already uses these)
+        p.person_full_name,
+        p.date_of_birth,
+        p.date_of_death,
+        p.next_of_kin_name,
+        p.contact_phone,
+        p.contact_email,
+        p.notes
+
+        ${extraSql},
+
+        CASE WHEN p.coordinates IS NULL THEN NULL
+             ELSE ST_Y(ST_PointOnSurface(p.coordinates::geometry)) END AS lat,
+        CASE WHEN p.coordinates IS NULL THEN NULL
+             ELSE ST_X(ST_PointOnSurface(p.coordinates::geometry)) END AS lng,
+
+        (
+          SELECT COUNT(*)::int
+          FROM graves g
+          WHERE g.plot_id::text = p.id::text
+        ) AS grave_count
+      FROM plots p
+      ${whereSql}
+      ORDER BY p.id ${order}
+      ${pageSql}
+    `;
+
+    const { rows } = await pool.query(sql, params);
+    return res.json({ ok: true, data: rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getPlotDetails(req, res, next) {
   try {
     if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
@@ -1569,6 +1689,8 @@ async function deleteVisitorUser(req, res, next) {
 
 module.exports = {
   dashboardMetrics,
+
+  getPlots,
 
   addPlots,
   editPlots,
