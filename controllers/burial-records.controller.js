@@ -1,4 +1,6 @@
 // backend/controllers/burial-records.controller.js
+"use strict";
+
 const pool = require("../config/database");
 
 /**
@@ -14,8 +16,8 @@ function logDebug(...args) {
   if (DEBUG_BURIAL) console.log("[BURIAL DEBUG]", ...args);
 }
 
-/** simple uid generator for graves */
-function genUid(len = 8) {
+/** simple uid generator for graves (MUST fit CHAR(5) if schema uses that) */
+function genUid(len = 5) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let out = "";
   for (let i = 0; i < len; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
@@ -29,28 +31,53 @@ async function isGraveUidTaken(uid) {
 
 async function ensureGraveUid(provided) {
   const u = typeof provided === "string" ? provided.trim() : "";
-  if (u) return u;
 
-  // generate unique-ish uid
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const cand = genUid(8);
+  // Only accept provided if it looks like a 5-char uid (avoids CHAR(5) errors)
+  if (u && u.length === 5) return u;
+
+  // generate unique-ish uid (5 chars)
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const cand = genUid(5);
     // eslint-disable-next-line no-await-in-loop
     if (!(await isGraveUidTaken(cand))) return cand;
   }
+
   // fallback
-  return genUid(12);
+  return genUid(5);
 }
 
 function normDate(v) {
-  const s = String(v ?? "").trim();
-  return s ? s.slice(0, 10) : null;
+  if (v === null || typeof v === "undefined") return null;
+
+  // If node-postgres returned a JS Date (common for timestamp/date columns)
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    const yyyy = v.getFullYear();
+    const mm = String(v.getMonth() + 1).padStart(2, "0");
+    const dd = String(v.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const s = String(v).trim();
+  if (!s) return null;
+
+  // If already ISO-ish, keep date part
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  // Last resort: parse and format
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 /* ============================================================
- * GET burial records (admin list + visitor filtered list)
- * - If you pass :id param OR ?family_contact= it will filter
- * - Otherwise returns all graves
- * - Includes plot fields (plot_name, plot_status, plot_uid)
+ * GET burial records
+ * - optional filter by family_contact (param or query)
+ * - includes plot fields even if graves.plot_id stores plot uid
  * ============================================================ */
 async function getBurialRecords(req, res, next) {
   try {
@@ -58,7 +85,6 @@ async function getBurialRecords(req, res, next) {
     const limit = req.query?.limit ? Number(req.query.limit) : null;
     const offset = req.query?.offset ? Number(req.query.offset) : null;
 
-    // ✅ always log when endpoint is hit
     log(
       `getBurialRecords HIT :: user=${req.user?.id ?? "anon"} role=${req.user?.role ?? "none"} :: familyId=${
         familyId ?? "none"
@@ -66,22 +92,9 @@ async function getBurialRecords(req, res, next) {
       req.query
     );
 
-    if (DEBUG_BURIAL) {
-      const c1 = await pool.query(`SELECT COUNT(*)::int AS n FROM graves`);
-      const c2 = await pool.query(`SELECT COUNT(*)::int AS n FROM plots`);
-      logDebug("graves count =", c1.rows?.[0]?.n);
-      logDebug("plots  count =", c2.rows?.[0]?.n);
-
-      const sample = await pool.query(
-        `SELECT id, uid, plot_id, deceased_name FROM graves ORDER BY id DESC LIMIT 5`
-      );
-      logDebug("graves sample =", sample.rows);
-    }
-
     let sql = `
       SELECT
         g.*,
-
         u.first_name || ' ' || u.last_name AS family_contact_name,
 
         p.plot_name AS plot_name,
@@ -91,15 +104,15 @@ async function getBurialRecords(req, res, next) {
       FROM graves g
       LEFT JOIN users u ON g.family_contact = u.id
 
-      -- ✅ IMPORTANT: cast to text so join matches even if types differ
-      LEFT JOIN plots p ON p.id::text = g.plot_id::text
+      -- ✅ join supports either plots.id OR plots.uid stored in graves.plot_id
+      LEFT JOIN plots p
+        ON (p.id::text = g.plot_id::text OR p.uid::text = g.plot_id::text)
     `;
 
     const params = [];
 
     if (familyId) {
       params.push(String(familyId));
-      // ✅ cast both sides to text so filter works even if types differ
       sql += ` WHERE g.family_contact::text = $${params.length}`;
     }
 
@@ -120,22 +133,6 @@ async function getBurialRecords(req, res, next) {
     const { rows } = await pool.query(sql, params);
 
     log(`getBurialRecords OK :: rows=${rows.length}`);
-
-    if (DEBUG_BURIAL) {
-      const preview = rows.slice(0, 8).map((r) => ({
-        id: r.id,
-        uid: r.uid,
-        plot_id: r.plot_id,
-        plot_name: r.plot_name,
-        plot_status: r.plot_status,
-        deceased_name: r.deceased_name ? String(r.deceased_name).slice(0, 40) : null,
-      }));
-      logDebug("preview =", preview);
-
-      const missingPlot = rows.filter((r) => !r.plot_name && !r.plot_status).length;
-      logDebug("missing plot join rows =", missingPlot);
-    }
-
     return res.json(rows);
   } catch (err) {
     console.error("[BURIAL] getBurialRecords ERROR:", err);
@@ -180,14 +177,19 @@ async function addBurialRecord(req, res, next) {
 
     await client.query("BEGIN");
 
-    // lock plot to avoid race
+    // ✅ lock plot using id OR uid
     const plotLock = await client.query(
-      `SELECT id, status, plot_name FROM plots WHERE id::text = $1 FOR UPDATE`,
+      `SELECT id, uid, status, plot_name FROM plots WHERE id::text = $1 OR uid::text = $1 FOR UPDATE`,
       [String(plot_id)]
     );
-    logDebug("plot lock =", plotLock.rows);
+    if (!plotLock.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Plot not found" });
+    }
 
-    // insert grave
+    const plotRow = plotLock.rows[0];
+
+    // insert grave (store plot reference as given)
     const ins = await client.query(
       `
       INSERT INTO graves
@@ -213,10 +215,10 @@ async function addBurialRecord(req, res, next) {
       ]
     );
 
-    // mark plot occupied
+    // ✅ mark plot occupied by REAL numeric id (safest)
     await client.query(
-      `UPDATE plots SET status = 'occupied', updated_at = NOW() WHERE id::text = $1`,
-      [String(plot_id)]
+      `UPDATE plots SET status = 'occupied', updated_at = NOW() WHERE id = $1`,
+      [plotRow.id]
     );
 
     await client.query("COMMIT");
@@ -236,9 +238,6 @@ async function addBurialRecord(req, res, next) {
 
 /* ============================================================
  * EDIT burial record (admin)
- * - Updates graves
- * - If plot_id changes, occupy new plot
- * - Optionally frees old plot if it has no more graves
  * ============================================================ */
 async function editBurialRecord(req, res, next) {
   const client = await pool.connect();
@@ -270,7 +269,6 @@ async function editBurialRecord(req, res, next) {
 
     await client.query("BEGIN");
 
-    // find current record
     const cur = await client.query(
       `SELECT id, uid, plot_id FROM graves WHERE id::text = $1 OR uid = $1 LIMIT 1`,
       [String(identifier)]
@@ -316,15 +314,15 @@ async function editBurialRecord(req, res, next) {
 
     const newPlotId = updated.rows[0]?.plot_id;
 
-    // occupy new plot
+    // occupy new plot (id OR uid supported)
     if (newPlotId) {
       await client.query(
-        `UPDATE plots SET status='occupied', updated_at=NOW() WHERE id::text=$1`,
+        `UPDATE plots SET status='occupied', updated_at=NOW() WHERE id::text=$1 OR uid::text=$1`,
         [String(newPlotId)]
       );
     }
 
-    // free old plot if it changed and no other graves use it
+    // free old plot if changed and no other graves use it
     if (oldPlotId && newPlotId && String(oldPlotId) !== String(newPlotId)) {
       const check = await client.query(
         `SELECT COUNT(*)::int AS n FROM graves WHERE plot_id::text = $1`,
@@ -332,7 +330,7 @@ async function editBurialRecord(req, res, next) {
       );
       if ((check.rows?.[0]?.n ?? 0) === 0) {
         await client.query(
-          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1`,
+          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1 OR uid::text=$1`,
           [String(oldPlotId)]
         );
       }
@@ -355,8 +353,6 @@ async function editBurialRecord(req, res, next) {
 
 /* ============================================================
  * DELETE burial record (admin)
- * - Deletes grave by id or uid (based on param)
- * - Optionally frees plot if no other graves exist for that plot
  * ============================================================ */
 async function deleteBurialRecord(req, res, next) {
   const client = await pool.connect();
@@ -373,7 +369,6 @@ async function deleteBurialRecord(req, res, next) {
 
     await client.query("BEGIN");
 
-    // get plot_id first
     const cur = await client.query(
       `SELECT id, uid, plot_id FROM graves WHERE id::text=$1 OR uid=$1 LIMIT 1`,
       [String(identifier)]
@@ -385,13 +380,11 @@ async function deleteBurialRecord(req, res, next) {
 
     const plotId = cur.rows[0].plot_id;
 
-    // delete
     const del = await client.query(
       `DELETE FROM graves WHERE id::text=$1 OR uid=$1 RETURNING *`,
       [String(identifier)]
     );
 
-    // free plot if no more graves
     if (plotId) {
       const check = await client.query(
         `SELECT COUNT(*)::int AS n FROM graves WHERE plot_id::text = $1`,
@@ -399,7 +392,7 @@ async function deleteBurialRecord(req, res, next) {
       );
       if ((check.rows?.[0]?.n ?? 0) === 0) {
         await client.query(
-          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1`,
+          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1 OR uid::text=$1`,
           [String(plotId)]
         );
       }

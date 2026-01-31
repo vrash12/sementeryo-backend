@@ -135,8 +135,31 @@ function genUid5() {
 }
 
 function normDate(v) {
-  const s = String(v ?? "").trim();
-  return s ? s.slice(0, 10) : null;
+  if (v === null || typeof v === "undefined") return null;
+
+  // If node-postgres returned a JS Date (common for timestamp/date columns)
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    const yyyy = v.getFullYear();
+    const mm = String(v.getMonth() + 1).padStart(2, "0");
+    const dd = String(v.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const s = String(v).trim();
+  if (!s) return null;
+
+  // If already ISO-ish, keep date part
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  // Last resort: parse and format
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 /* =========================================================================================
@@ -1047,7 +1070,6 @@ async function confirmBurialRequestAsAdmin(req, res, next) {
   }
 }
 
-
 /* =========================================================================================
    ADMIN: users / metrics / plot details
 ========================================================================================= */
@@ -1285,7 +1307,6 @@ async function dashboardMetrics(req, res, next) {
   }
 }
 
-
 /* =========================================================================================
    ✅ ADMIN: BurialPlots (plots) LIST
    GET /admin/plots?search=&status=&limit=&offset=&order=asc|desc
@@ -1451,7 +1472,6 @@ async function getPlotDetails(req, res, next) {
     next(err);
   }
 }
-
 
 // ===== USERS CRUD (Admin/Staff only) =====
 
@@ -1685,8 +1705,6 @@ async function deleteVisitorUser(req, res, next) {
   }
 }
 
-
-
 module.exports = {
   dashboardMetrics,
 
@@ -1719,7 +1737,7 @@ module.exports = {
   uploadPlotPhoto,
 
   // ✅ users
- getVisitorUsers,
+  getVisitorUsers,
   addVisitorUser,
   updateVisitorUser,
   deleteVisitorUser,

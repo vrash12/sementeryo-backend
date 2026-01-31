@@ -3,7 +3,7 @@ const path = require("path");
 const { Pool } = require("pg");
 const dotenv = require("dotenv");
 
-// Load .env from project root (cemetery-mono/.env)
+// Load .env from proj backendect root (cemetery-mono/.env)
 dotenv.config({
   path: path.resolve(__dirname, "..", "..", ".env"),
   override: false, // don't clobber already-set env vars
