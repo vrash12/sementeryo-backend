@@ -5,7 +5,6 @@ const express = require("express");
 const router = express.Router();
 
 const { verifyToken, requireRole } = require("../middleware/auth");
-
 const visitorController = require("../controllers/visitor.controller");
 
 const allowVisitor = requireRole(["visitor"]);
@@ -29,24 +28,56 @@ router.get(
 
 /* --- burial request --- */
 router.post("/request-burial", allowVisitor, visitorController.createBurialRequest);
+
+// ✅ ALIAS (so POST /visitor/burial-request works)
+router.post("/burial-request", allowVisitor, visitorController.createBurialRequest);
+
+router.post(
+  "/burial-requests/:id/death-certificate",
+  allowVisitor,
+  visitorController.uploadBurialRequestDeathCertificate
+);
+
 router.get(
   "/my-burial-requests/:family_contact",
   allowVisitor,
   visitorController.getBurialRequests
 );
+
+// ✅ ALIAS (so GET /visitor/burial-requests/:family_contact works)
+router.get(
+  "/burial-requests/:family_contact",
+  allowVisitor,
+  visitorController.getBurialRequests
+);
+
 router.patch(
   "/request-burial/cancel/:id",
   allowVisitor,
   visitorController.cancelBurialRequest
 );
 
+// ✅ ALIASES (match your frontend fallbacks)
+router.patch(
+  "/burial-request/:id/cancel",
+  allowVisitor,
+  visitorController.cancelBurialRequest
+);
+router.patch(
+  "/cancel-burial-request/:id",
+  allowVisitor,
+  visitorController.cancelBurialRequest
+);
+
 /* --- maintenance request --- */
 router.post("/request-maintenance", allowVisitor, visitorController.createMaintenanceRequest);
+
 router.get(
   "/my-maintenance-requests/:family_contact",
   allowVisitor,
   visitorController.getMaintenanceRequests
 );
+
 router.patch(
   "/request-maintenance/cancel/:id",
   allowVisitor,
@@ -59,24 +90,30 @@ router.get("/dashboard-stats", allowVisitor, visitorController.getDashboardStats
 /* --- reservations --- */
 router.post("/reserve-plot", allowVisitor, visitorController.reservePlot);
 router.get("/my-reservations", allowVisitor, visitorController.getMyReservations);
+
 router.patch(
   "/cancel-reservation/:id",
   allowVisitor,
   visitorController.cancelReservation
 );
 
-
-/* --- ✅ maintenance schedule extras --- */
+/* --- maintenance schedule extras --- */
 router.get(
   "/my-maintenance-schedule/:family_contact",
   allowVisitor,
   visitorController.getMyMaintenanceSchedule
 );
+
 router.patch(
   "/maintenance/:id/request-reschedule",
   allowVisitor,
   visitorController.requestMaintenanceReschedule
 );
-router.post("/maintenance/:id/feedback", allowVisitor, visitorController.submitMaintenanceFeedback);
+
+router.post(
+  "/maintenance/:id/feedback",
+  allowVisitor,
+  visitorController.submitMaintenanceFeedback
+);
 
 module.exports = router;

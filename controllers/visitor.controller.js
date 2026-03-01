@@ -466,22 +466,45 @@ async function createBurialRequest(req, res) {
   }
 }
 
-/**
- * ✅ Upload death certificate for a burial request
- * Field name: death_certificate
- * Saves file: backend/uploads/death-certificates/...
- * Stores URL: burial_requests.death_certificate_url
- */
+
+
+// ✅ Upload death certificate for a burial request
+// Route: POST /api/visitor/burial-requests/:id/death-certificate
+// Field name (FormData): death_certificate
 async function uploadBurialRequestDeathCertificate(req, res) {
+  const requestId = String(req.params?.id || "").trim();
+
+  // --- tiny helper for consistent 400s ---
+  const bad = (msg) => res.status(400).json({ success: false, message: msg });
+
   try {
-    const { id } = req.params;
-    if (!id) return sendBadRequest(res, "Burial request id is required");
+    if (!requestId) return bad("Burial request id is required");
 
-    const user_id = req.user?.id;
-    if (!user_id) return res.status(401).json({ success: false, message: "Unauthorized" });
+    const userId = req.user?.id;
+    const role = String(req.user?.role || "").toLowerCase();
+    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
 
-    const hasCol = await hasColumn("burial_requests", "death_certificate_url");
-    if (!hasCol) {
+    // 🔎 Debug (remove after fix)
+    console.log("[death-cert] requestId=", requestId, "userId=", userId, "role=", role);
+
+    // ✅ IMPORTANT: avoid stale cache confusion by checking column directly here
+    // (You can keep your hasColumn() cache elsewhere, but this endpoint is sensitive.)
+    const colCheck = await pool.query(
+      `
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'burial_requests'
+        AND column_name = 'death_certificate_url'
+      LIMIT 1
+      `
+    );
+    const hasDeathCertCol = colCheck.rows.length > 0;
+
+    // 🔎 Debug (remove after fix)
+    console.log("[death-cert] has death_certificate_url column =", hasDeathCertCol);
+
+    if (!hasDeathCertCol) {
       return res.status(400).json({
         success: false,
         message:
@@ -490,54 +513,103 @@ async function uploadBurialRequestDeathCertificate(req, res) {
       });
     }
 
+    // ✅ Multer handles multipart/form-data
+    // NOTE: uploadDeathCertificate must be defined above:
+    // const uploadDeathCertificate = multer(...).single("death_certificate");
     uploadDeathCertificate(req, res, async (err) => {
-      if (err) return res.status(400).json({ success: false, message: err.message || "Upload error" });
-      if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded (death_certificate)" });
-
-      // fetch request
-      const cur = await pool.query(`SELECT * FROM burial_requests WHERE id = $1 LIMIT 1`, [id]);
-      if (!cur.rows.length) {
-        try { fs.unlinkSync(req.file.path); } catch {}
-        return res.status(404).json({ success: false, message: "Burial request not found" });
-      }
-
-      const row = cur.rows[0];
-
-      // visitor can only upload for their own request
-      const role = String(req.user?.role || "").toLowerCase();
-      if (role === "visitor" && String(row.family_contact) !== String(user_id)) {
-        try { fs.unlinkSync(req.file.path); } catch {}
-        return res.status(403).json({ success: false, message: "Forbidden" });
-      }
-
-      // delete old file (optional)
-      const oldUrl = String(row.death_certificate_url || "").trim();
-      if (oldUrl) {
-        const oldName = oldUrl.split("/").pop();
-        if (oldName) {
-          const oldPath = path.join(deathCertDir, oldName);
-          try { if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath); } catch {}
+      try {
+        // Multer errors / fileFilter errors => 400
+        if (err) {
+          const msg =
+            err?.code === "LIMIT_FILE_SIZE"
+              ? "File is too large. Max allowed is 12MB."
+              : err?.message || "Upload error";
+          console.log("[death-cert] multer err:", msg);
+          return res.status(400).json({ success: false, message: msg });
         }
+
+        if (!req.file) {
+          console.log("[death-cert] no req.file (field mismatch or empty upload)");
+          return res
+            .status(400)
+            .json({ success: false, message: "No file uploaded (death_certificate)" });
+        }
+
+        // 🔎 Debug (remove after fix)
+        console.log("[death-cert] uploaded file:", {
+          originalname: req.file.originalname,
+          mimetype: req.file.mimetype,
+          size: req.file.size,
+          filename: req.file.filename,
+          path: req.file.path,
+        });
+
+        // Fetch the burial request row
+        const cur = await pool.query(
+          `SELECT * FROM burial_requests WHERE id = $1 LIMIT 1`,
+          [requestId]
+        );
+
+        if (!cur.rows.length) {
+          // cleanup uploaded file if request id invalid
+          try {
+            fs.unlinkSync(req.file.path);
+          } catch {}
+          return res.status(404).json({ success: false, message: "Burial request not found" });
+        }
+
+        const row = cur.rows[0];
+
+        // ✅ visitor can only upload for their own request
+        if (role === "visitor" && String(row.family_contact) !== String(userId)) {
+          try {
+            fs.unlinkSync(req.file.path);
+          } catch {}
+          return res.status(403).json({ success: false, message: "Forbidden" });
+        }
+
+        // Optional: delete old file (if any)
+        const oldUrl = String(row.death_certificate_url || "").trim();
+        if (oldUrl) {
+          // prevent traversal by using basename
+          const oldName = path.basename(oldUrl);
+          const oldPath = path.join(deathCertDir, oldName);
+          try {
+            if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          } catch (e) {
+            console.warn("[death-cert] failed to delete old file:", e?.message || e);
+          }
+        }
+
+        // Save URL (served from app.use("/uploads", express.static(...)))
+        const fileUrl = `/uploads/death-certificates/${req.file.filename}`;
+
+        const upd = await pool.query(
+          `
+          UPDATE burial_requests
+          SET death_certificate_url = $2,
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING *;
+          `,
+          [requestId, fileUrl]
+        );
+
+        return res.json({
+          success: true,
+          message: "Death certificate uploaded.",
+          data: upd.rows[0],
+        });
+      } catch (cbErr) {
+        console.error("uploadBurialRequestDeathCertificate callback error:", cbErr);
+
+        // cleanup the newly uploaded file on server error
+        try {
+          if (req.file?.path) fs.unlinkSync(req.file.path);
+        } catch {}
+
+        return res.status(500).json({ success: false, message: "Server error" });
       }
-
-      const fileUrl = `/uploads/death-certificates/${req.file.filename}`;
-
-      const upd = await pool.query(
-        `
-        UPDATE burial_requests
-        SET death_certificate_url = $2,
-            updated_at = NOW()
-        WHERE id = $1
-        RETURNING *;
-        `,
-        [id, fileUrl]
-      );
-
-      return res.json({
-        success: true,
-        message: "Death certificate uploaded.",
-        data: upd.rows[0],
-      });
     });
   } catch (e) {
     console.error("uploadBurialRequestDeathCertificate error:", e);

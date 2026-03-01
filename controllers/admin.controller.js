@@ -52,12 +52,10 @@ async function hasTable(tableName) {
 ========================================================================================= */
 async function uploadPlotPhoto(req, res, next) {
   try {
-    if (!isPrivileged(req.user))
-      return res.status(403).json({ error: "Forbidden" });
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const identifier = req.params?.id;
-    if (!identifier)
-      return res.status(400).json({ error: "Missing plot identifier." });
+    if (!identifier) return res.status(400).json({ error: "Missing plot identifier." });
 
     const file = req.file;
     if (!file) return res.status(400).json({ error: "No file uploaded (photo)." });
@@ -112,10 +110,8 @@ function parseLatLngFromString(s) {
     if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
   }
 
-  // "lat lng" or "lat, lng"
-  const mPair = t.match(
-    /^\s*([+-]?\d+(?:\.\d+)?)\s*,?\s+([+-]?\d+(?:\.\d+)?)\s*$/
-  );
+  // "lat lng" or "lat, lng" (requires at least one space between numbers)
+  const mPair = t.match(/^\s*([+-]?\d+(?:\.\d+)?)\s*,?\s+([+-]?\d+(?:\.\d+)?)\s*$/);
   if (mPair) {
     const lat = Number(mPair[1]);
     const lng = Number(mPair[2]);
@@ -126,18 +122,15 @@ function parseLatLngFromString(s) {
 }
 
 function genUid5() {
-  const alphabet =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let out = "";
-  for (let i = 0; i < 5; i++)
-    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  for (let i = 0; i < 5; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
   return out;
 }
 
 function normDate(v) {
   if (v === null || typeof v === "undefined") return null;
 
-  // If node-postgres returned a JS Date (common for timestamp/date columns)
   if (v instanceof Date) {
     if (Number.isNaN(v.getTime())) return null;
     const yyyy = v.getFullYear();
@@ -149,11 +142,9 @@ function normDate(v) {
   const s = String(v).trim();
   if (!s) return null;
 
-  // If already ISO-ish, keep date part
   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
 
-  // Last resort: parse and format
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   const yyyy = d.getFullYear();
@@ -169,17 +160,13 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
   const includePersonal = !!opts.includePersonal;
 
   const isUidTaken = async (uid) => {
-    const { rows } = await pool.query(
-      `SELECT 1 FROM ${tableName} WHERE uid = $1 LIMIT 1`,
-      [uid]
-    );
+    const { rows } = await pool.query(`SELECT 1 FROM ${tableName} WHERE uid = $1 LIMIT 1`, [uid]);
     return rows.length > 0;
   };
 
   const add = async (req, res, next) => {
     try {
-      if (!isPrivileged(req.user))
-        return res.status(403).json({ error: "Forbidden" });
+      if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
       const {
         uid: uidRaw,
@@ -217,18 +204,12 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
         const lng = Number(longitude);
         if (Number.isFinite(lat) && Number.isFinite(lng)) latLng = { lat, lng };
       }
-      if (
-        !latLng &&
-        typeof coordinatesRaw === "string" &&
-        coordinatesRaw.trim() !== ""
-      ) {
+      if (!latLng && typeof coordinatesRaw === "string" && coordinatesRaw.trim() !== "") {
         latLng = parseLatLngFromString(coordinatesRaw);
       }
 
       const status =
-        statusRaw && String(statusRaw).trim() !== ""
-          ? String(statusRaw).trim()
-          : "available";
+        statusRaw && String(statusRaw).trim() !== "" ? String(statusRaw).trim() : "available";
 
       let uid = typeof uidRaw === "string" && uidRaw.length === 5 ? uidRaw : null;
       if (uid && (await isUidTaken(uid))) uid = null;
@@ -241,20 +222,10 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
             break;
           }
         }
-        if (!uid)
-          return res.status(500).json({ error: "Failed to generate uid" });
+        if (!uid) return res.status(500).json({ error: "Failed to generate uid" });
       }
 
-      const cols = [
-        "uid",
-        "plot_name",
-        "plot_type",
-        "size_sqm",
-        "status",
-        "price",
-        "created_at",
-        "updated_at",
-      ];
+      const cols = ["uid", "plot_name", "plot_type", "size_sqm", "status", "price", "created_at", "updated_at"];
 
       const params = [];
       const addParam = (v) => {
@@ -325,8 +296,7 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
 
   const edit = async (req, res, next) => {
     try {
-      if (!isPrivileged(req.user))
-        return res.status(403).json({ error: "Forbidden" });
+      if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
       const id = req.body?.id ?? req.params?.id;
       if (!id) return res.status(400).json({ error: "id is required" });
@@ -367,11 +337,7 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
         const lng = Number(longitude);
         if (Number.isFinite(lat) && Number.isFinite(lng)) latLng = { lat, lng };
       }
-      if (
-        !latLng &&
-        typeof coordinatesRaw === "string" &&
-        coordinatesRaw.trim() !== ""
-      ) {
+      if (!latLng && typeof coordinatesRaw === "string" && coordinatesRaw.trim() !== "") {
         latLng = parseLatLngFromString(coordinatesRaw);
       }
 
@@ -396,10 +362,8 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
       if (includePersonal) {
         if (typeof person_full_name !== "undefined")
           addSet("person_full_name", String(person_full_name ?? "").trim() || null);
-        if (typeof date_of_birth !== "undefined")
-          addSet("date_of_birth", normDate(date_of_birth));
-        if (typeof date_of_death !== "undefined")
-          addSet("date_of_death", normDate(date_of_death));
+        if (typeof date_of_birth !== "undefined") addSet("date_of_birth", normDate(date_of_birth));
+        if (typeof date_of_death !== "undefined") addSet("date_of_death", normDate(date_of_death));
         if (typeof next_of_kin_name !== "undefined")
           addSet("next_of_kin_name", String(next_of_kin_name ?? "").trim() || null);
         if (typeof contact_phone !== "undefined")
@@ -409,14 +373,10 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
         if (typeof notes !== "undefined") addSet("notes", notes);
 
         if (await hasColumn(tableName, "photo_url")) {
-          if (typeof photo_url !== "undefined") {
-            addSet("photo_url", String(photo_url ?? "").trim() || null);
-          }
+          if (typeof photo_url !== "undefined") addSet("photo_url", String(photo_url ?? "").trim() || null);
         }
         if (await hasColumn(tableName, "qr_token")) {
-          if (typeof qr_token !== "undefined") {
-            addSet("qr_token", String(qr_token ?? "").trim() || null);
-          }
+          if (typeof qr_token !== "undefined") addSet("qr_token", String(qr_token ?? "").trim() || null);
         }
       }
 
@@ -427,8 +387,7 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
       }
 
       sets.push("updated_at = NOW()");
-      if (sets.length === 1)
-        return res.status(400).json({ error: "No updatable fields provided" });
+      if (sets.length === 1) return res.status(400).json({ error: "No updatable fields provided" });
 
       const sql = `UPDATE ${tableName} SET ${sets.join(", ")} WHERE id = $${i} RETURNING *`;
       params.push(id);
@@ -443,8 +402,7 @@ function makePlotHandlers(tableName, opts = { includePersonal: false }) {
 
   const del = async (req, res, next) => {
     try {
-      if (!isPrivileged(req.user))
-        return res.status(403).json({ error: "Forbidden" });
+      if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
       const raw = req.params?.id ?? req.body?.id;
       if (!raw) return res.status(400).json({ error: "id (or uid) is required" });
@@ -554,8 +512,7 @@ async function updatePlotPersonFields(client, plotId, deceasedName, birthDate, d
 ========================================================================================= */
 async function getBurialRecords(req, res, next) {
   try {
-    if (!isPrivileged(req.user))
-      return res.status(403).json({ error: "Forbidden" });
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const limit = req.query?.limit ? Number(req.query.limit) : null;
     const offset = req.query?.offset ? Number(req.query.offset) : null;
@@ -593,8 +550,7 @@ async function getBurialRecords(req, res, next) {
 async function addBurialRecord(req, res, next) {
   const client = await pool.connect();
   try {
-    if (!isPrivileged(req.user))
-      return res.status(403).json({ error: "Forbidden" });
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const {
       uid,
@@ -659,10 +615,9 @@ async function addBurialRecord(req, res, next) {
       ]
     );
 
-    await client.query(
-      `UPDATE plots SET status = 'occupied', updated_at = NOW() WHERE id::text = $1`,
-      [String(plot_id)]
-    );
+    await client.query(`UPDATE plots SET status = 'occupied', updated_at = NOW() WHERE id::text = $1`, [
+      String(plot_id),
+    ]);
 
     // ✅ keep plots person fields synced (for visitor search/UI)
     await updatePlotPersonFields(client, plot_id, deceased_name, birth_date, death_date);
@@ -682,8 +637,7 @@ async function addBurialRecord(req, res, next) {
 async function editBurialRecord(req, res, next) {
   const client = await pool.connect();
   try {
-    if (!isPrivileged(req.user))
-      return res.status(403).json({ error: "Forbidden" });
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const {
       id,
@@ -733,9 +687,8 @@ async function editBurialRecord(req, res, next) {
         return res.status(409).json({ error: "New plot is already occupied" });
       }
 
-      await client.query(`SELECT id FROM plots WHERE id::text = $1 FOR UPDATE`, [
-        String(oldPlotId),
-      ]);
+      // lock old plot too
+      await client.query(`SELECT id FROM plots WHERE id::text = $1 FOR UPDATE`, [String(oldPlotId)]);
     }
 
     const updated = await client.query(
@@ -770,27 +723,34 @@ async function editBurialRecord(req, res, next) {
       ]
     );
 
-    const finalPlotId = updated.rows[0]?.plot_id;
+    const row = updated.rows[0];
+    const finalPlotId = row?.plot_id;
 
+    // occupy final plot
     if (finalPlotId) {
-      await client.query(
-        `UPDATE plots SET status='occupied', updated_at=NOW() WHERE id::text=$1`,
-        [String(finalPlotId)]
-      );
+      await client.query(`UPDATE plots SET status='occupied', updated_at=NOW() WHERE id::text=$1`, [
+        String(finalPlotId),
+      ]);
+
+      // ✅ sync plots person fields for final plot (even if not moved)
+      await updatePlotPersonFields(client, finalPlotId, row.deceased_name, row.birth_date, row.death_date);
     }
 
+    // if moved, free old plot if no longer used
     if (oldPlotId && finalPlotId && String(oldPlotId) !== String(finalPlotId)) {
       const stillUsed = await plotHasAnyGrave(client, oldPlotId);
       if (!stillUsed) {
-        await client.query(
-          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1`,
-          [String(oldPlotId)]
-        );
+        await client.query(`UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1`, [
+          String(oldPlotId),
+        ]);
+
+        // ✅ clear old plot person fields
+        await updatePlotPersonFields(client, oldPlotId, null, null, null);
       }
     }
 
     await client.query("COMMIT");
-    return res.json(updated.rows[0]);
+    return res.json(row);
   } catch (err) {
     try {
       await client.query("ROLLBACK");
@@ -804,16 +764,13 @@ async function editBurialRecord(req, res, next) {
 async function deleteBurialRecord(req, res, next) {
   const client = await pool.connect();
   try {
-    if (!isPrivileged(req.user))
-      return res.status(403).json({ error: "Forbidden" });
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const identifier = req.params?.id;
-    if (!identifier)
-      return res.status(400).json({ error: "Missing record identifier." });
+    if (!identifier) return res.status(400).json({ error: "Missing record identifier." });
 
     await client.query("BEGIN");
 
-    // find record first to know plot_id for cleanup
     const cur = await client.query(
       `SELECT id, uid, plot_id FROM graves WHERE id::text = $1 OR uid = $1 LIMIT 1`,
       [String(identifier)]
@@ -830,14 +787,15 @@ async function deleteBurialRecord(req, res, next) {
       [String(identifier)]
     );
 
-    // if that plot no longer has graves, revert plot status to available
     if (plotId) {
       const stillUsed = await plotHasAnyGrave(client, plotId);
       if (!stillUsed) {
-        await client.query(
-          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1`,
-          [String(plotId)]
-        );
+        await client.query(`UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1`, [
+          String(plotId),
+        ]);
+
+        // ✅ clear plot person fields (optional but keeps search clean)
+        await updatePlotPersonFields(client, plotId, null, null, null);
       }
     }
 
@@ -946,10 +904,9 @@ async function confirmBurialRequestAsAdmin(req, res, next) {
     }
 
     // lock plot
-    const plotLock = await client.query(
-      `SELECT id, status FROM plots WHERE id::text = $1 FOR UPDATE`,
-      [plotId]
-    );
+    const plotLock = await client.query(`SELECT id, status FROM plots WHERE id::text = $1 FOR UPDATE`, [
+      plotId,
+    ]);
     if (!plotLock.rows.length) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Plot not found" });
@@ -1008,10 +965,9 @@ async function confirmBurialRequestAsAdmin(req, res, next) {
     );
 
     // occupy plot + sync person fields
-    await client.query(
-      `UPDATE plots SET status = 'occupied', updated_at = NOW() WHERE id::text = $1`,
-      [plotId]
-    );
+    await client.query(`UPDATE plots SET status = 'occupied', updated_at = NOW() WHERE id::text = $1`, [
+      plotId,
+    ]);
     await updatePlotPersonFields(client, plotId, br.deceased_name, br.birth_date, br.death_date);
 
     // update burial_request -> confirmed (+ optional columns)
@@ -1075,8 +1031,7 @@ async function confirmBurialRequestAsAdmin(req, res, next) {
 ========================================================================================= */
 async function getVisitorUsers(req, res, next) {
   try {
-    if (!isPrivileged(req.user))
-      return res.status(403).json({ error: "Forbidden" });
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const { rows } = await pool.query(
       `
@@ -1105,11 +1060,8 @@ async function getVisitorUsers(req, res, next) {
 
 async function dashboardMetrics(req, res, next) {
   try {
-    if (!isPrivileged(req.user)) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
+    if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
-    // tables
     const hasBurialSchedules = await hasTable("burial_schedules");
     const hasBurialRequests = await hasTable("burial_requests");
     const hasPlotCode = await hasColumn("plots", "plot_code");
@@ -1122,18 +1074,14 @@ async function dashboardMetrics(req, res, next) {
     const uHasUsername = await hasColumn("users", "username");
     const uHasEmail = await hasColumn("users", "email");
 
-    // upcoming limit support
     const rawLimit = String(req.query?.upcoming_limit ?? "").trim().toLowerCase();
     let upcomingLimit = 5;
-    if (rawLimit === "all" || rawLimit === "0") {
-      upcomingLimit = null; // no limit
-    } else if (rawLimit) {
+    if (rawLimit === "all" || rawLimit === "0") upcomingLimit = null;
+    else if (rawLimit) {
       const n = Number(rawLimit);
       if (Number.isFinite(n) && n > 0) upcomingLimit = n;
     }
 
-    // ---------- COUNTS ----------
-    // pending burials: prefer burial_schedules, else fallback to burial_requests
     const pendingBurialsExpr = hasBurialSchedules
       ? `(SELECT COUNT(*) FROM burial_schedules WHERE LOWER(status) = 'pending')`
       : hasBurialRequests
@@ -1157,8 +1105,6 @@ async function dashboardMetrics(req, res, next) {
       ORDER BY status
     `;
 
-    // ---------- UPCOMING BURIALS ----------
-    // Always return plot_code for frontend compatibility
     const plotCodeSql = hasPlotCode
       ? `COALESCE(p.plot_code::text, p.plot_name::text) AS plot_code`
       : `p.plot_name::text AS plot_code`;
@@ -1189,23 +1135,13 @@ async function dashboardMetrics(req, res, next) {
 
       upcomingBurials = await pool.query(upcomingBurialsQuery, params);
     } else if (hasBurialRequests) {
-      // figure out which date column exists
       const brHasScheduledDate = await hasColumn("burial_requests", "scheduled_date");
       const brHasBurialDate = await hasColumn("burial_requests", "burial_date");
-      const dateCol = brHasScheduledDate
-        ? "scheduled_date"
-        : brHasBurialDate
-        ? "burial_date"
-        : null;
+      const dateCol = brHasScheduledDate ? "scheduled_date" : brHasBurialDate ? "burial_date" : null;
 
-      // figure out which time column exists
       const brHasScheduledTime = await hasColumn("burial_requests", "scheduled_time");
       const brHasBurialTime = await hasColumn("burial_requests", "burial_time");
-      const timeCol = brHasScheduledTime
-        ? "scheduled_time"
-        : brHasBurialTime
-        ? "burial_time"
-        : null;
+      const timeCol = brHasScheduledTime ? "scheduled_time" : brHasBurialTime ? "burial_time" : null;
 
       const brHasPlotId = await hasColumn("burial_requests", "plot_id");
 
@@ -1241,15 +1177,10 @@ async function dashboardMetrics(req, res, next) {
       }
     }
 
-    // ---------- RECENT MAINTENANCE ----------
     let joinKeyExpr = "NULL";
-    if (mrHasRequesterId && mrHasFamilyContact) {
-      joinKeyExpr = `COALESCE(mr.requester_id::text, mr.family_contact::text)`;
-    } else if (mrHasRequesterId) {
-      joinKeyExpr = `mr.requester_id::text`;
-    } else if (mrHasFamilyContact) {
-      joinKeyExpr = `mr.family_contact::text`;
-    }
+    if (mrHasRequesterId && mrHasFamilyContact) joinKeyExpr = `COALESCE(mr.requester_id::text, mr.family_contact::text)`;
+    else if (mrHasRequesterId) joinKeyExpr = `mr.requester_id::text`;
+    else if (mrHasFamilyContact) joinKeyExpr = `mr.family_contact::text`;
 
     const namePieces = [];
     if (uHasFirst) namePieces.push(`COALESCE(u.first_name,'')`);
@@ -1323,16 +1254,11 @@ async function getPlots(req, res, next) {
     const offsetRaw = req.query?.offset;
 
     const limit =
-      limitRaw === undefined || limitRaw === null || String(limitRaw).trim() === ""
-        ? 200
-        : Number(limitRaw);
+      limitRaw === undefined || limitRaw === null || String(limitRaw).trim() === "" ? 200 : Number(limitRaw);
 
     const offset =
-      offsetRaw === undefined || offsetRaw === null || String(offsetRaw).trim() === ""
-        ? 0
-        : Number(offsetRaw);
+      offsetRaw === undefined || offsetRaw === null || String(offsetRaw).trim() === "" ? 0 : Number(offsetRaw);
 
-    // Optional columns
     const extras = [];
     if (await hasColumn("plots", "photo_url")) extras.push("p.photo_url");
     if (await hasColumn("plots", "qr_token")) extras.push("p.qr_token");
@@ -1367,7 +1293,6 @@ async function getPlots(req, res, next) {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    // Pagination
     const useLimit = Number.isFinite(limit) && limit > 0;
     const useOffset = Number.isFinite(offset) && offset >= 0;
 
@@ -1391,7 +1316,6 @@ async function getPlots(req, res, next) {
         p.status,
         p.price,
 
-        -- personal fields (your plots table already uses these)
         p.person_full_name,
         p.date_of_birth,
         p.date_of_death,
@@ -1430,8 +1354,7 @@ async function getPlotDetails(req, res, next) {
     if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
     const identifier = req.params?.id;
-    if (!identifier)
-      return res.status(400).json({ error: "Missing plot identifier." });
+    if (!identifier) return res.status(400).json({ error: "Missing plot identifier." });
 
     const extras = [];
     if (await hasColumn("plots", "photo_url")) extras.push("photo_url");
@@ -1504,16 +1427,8 @@ async function addVisitorUser(req, res, next) {
   try {
     if (!isPrivileged(req.user)) return res.status(403).json({ error: "Forbidden" });
 
-    const {
-      username,
-      email,
-      first_name,
-      last_name,
-      phone,
-      address,
-      is_active,
-      password_str,
-    } = req.body || {};
+    const { username, email, first_name, last_name, phone, address, is_active, password_str } =
+      req.body || {};
 
     const u = String(username || "").trim();
     const e = String(email || "").trim();
@@ -1527,7 +1442,6 @@ async function addVisitorUser(req, res, next) {
       });
     }
 
-    // prevent duplicates
     const dup = await pool.query(
       `SELECT 1 FROM users WHERE LOWER(username)=LOWER($1) OR LOWER(email)=LOWER($2) LIMIT 1`,
       [u, e]
@@ -1544,15 +1458,24 @@ async function addVisitorUser(req, res, next) {
     if (hashCol) {
       if (!bcrypt) {
         return res.status(500).json({
-          error:
-            "Password hashing column exists but bcrypt is not installed. Install bcryptjs or bcrypt.",
+          error: "Password hashing column exists but bcrypt is not installed. Install bcryptjs or bcrypt.",
         });
       }
       hashed = await bcrypt.hash(pwd, 10);
     }
 
-    // Build dynamic INSERT safely
-    const cols = ["username", "email", "first_name", "last_name", "phone", "address", "role", "is_active", "created_at", "updated_at"];
+    const cols = [
+      "username",
+      "email",
+      "first_name",
+      "last_name",
+      "phone",
+      "address",
+      "role",
+      "is_active",
+      "created_at",
+      "updated_at",
+    ];
     const params = [];
     const placeholders = [];
 
@@ -1604,22 +1527,12 @@ async function updateVisitorUser(req, res, next) {
     const id = req.params?.id;
     if (!id) return res.status(400).json({ error: "Missing user id." });
 
-    const {
-      username,
-      email,
-      first_name,
-      last_name,
-      phone,
-      address,
-      is_active,
-      password_str, // optional
-    } = req.body || {};
+    const { username, email, first_name, last_name, phone, address, is_active, password_str } =
+      req.body || {};
 
-    // only allow updates on visitors
-    const exists = await pool.query(
-      `SELECT id FROM users WHERE id::text=$1 AND role='visitor' LIMIT 1`,
-      [String(id)]
-    );
+    const exists = await pool.query(`SELECT id FROM users WHERE id::text=$1 AND role='visitor' LIMIT 1`, [
+      String(id),
+    ]);
     if (!exists.rows.length) return res.status(404).json({ error: "Visitor not found." });
 
     const sets = [];
@@ -1650,8 +1563,7 @@ async function updateVisitorUser(req, res, next) {
       if (hashCol) {
         if (!bcrypt) {
           return res.status(500).json({
-            error:
-              "Password hashing column exists but bcrypt is not installed. Install bcryptjs or bcrypt.",
+            error: "Password hashing column exists but bcrypt is not installed. Install bcryptjs or bcrypt.",
           });
         }
         const hashed = await bcrypt.hash(pwd, 10);
@@ -1685,16 +1597,14 @@ async function deleteVisitorUser(req, res, next) {
     const id = req.params?.id;
     if (!id) return res.status(400).json({ error: "Missing user id." });
 
-    const del = await pool.query(
-      `DELETE FROM users WHERE id::text=$1 AND role='visitor' RETURNING id`,
-      [String(id)]
-    );
+    const del = await pool.query(`DELETE FROM users WHERE id::text=$1 AND role='visitor' RETURNING id`, [
+      String(id),
+    ]);
 
     if (!del.rows.length) return res.status(404).json({ error: "Visitor not found." });
 
     return res.json({ ok: true, deleted_id: del.rows[0].id });
   } catch (err) {
-    // FK constraint (example: user referenced by graves, etc.)
     if (err && err.code === "23503") {
       return res.status(409).json({
         error: "Cannot delete user: referenced by other records.",
