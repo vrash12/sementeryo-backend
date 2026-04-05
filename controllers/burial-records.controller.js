@@ -1,4 +1,3 @@
-// backend/controllers/burial-records.controller.js
 "use strict";
 
 const pool = require("../config/database");
@@ -74,6 +73,187 @@ function normDate(v) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+/* ---------------- tiny DB helpers ---------------- */
+const _hasColumnCache = new Map();
+
+async function hasColumn(tableName, columnName) {
+  const key = `${String(tableName)}.${String(columnName)}`;
+  if (_hasColumnCache.has(key)) return _hasColumnCache.get(key);
+
+  const { rows } = await pool.query(
+    `
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = $1
+      AND column_name = $2
+    LIMIT 1
+    `,
+    [String(tableName), String(columnName)]
+  );
+
+  const ok = rows.length > 0;
+  _hasColumnCache.set(key, ok);
+  return ok;
+}
+
+async function resolvePlotRow(client, identifier, { forUpdate = false } = {}) {
+  const lockSql = forUpdate ? " FOR UPDATE" : "";
+  const { rows } = await client.query(
+    `
+    SELECT id, uid, status, plot_name
+    FROM plots
+    WHERE id::text = $1 OR uid::text = $1
+    ORDER BY id ASC
+    ${lockSql}
+    `,
+    [String(identifier)]
+  );
+  return rows[0] || null;
+}
+
+async function countGravesForPlot(client, plotRow) {
+  if (!plotRow) return 0;
+
+  const { rows } = await client.query(
+    `
+    SELECT COUNT(*)::int AS n
+    FROM graves
+    WHERE plot_id::text = $1
+       OR plot_id::text = $2
+    `,
+    [String(plotRow.id), String(plotRow.uid)]
+  );
+
+  return rows?.[0]?.n ?? 0;
+}
+
+async function getLatestGraveForPlot(client, plotRow) {
+  if (!plotRow) return null;
+
+  const { rows } = await client.query(
+    `
+    SELECT *
+    FROM graves
+    WHERE plot_id::text = $1
+       OR plot_id::text = $2
+    ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+    LIMIT 1
+    `,
+    [String(plotRow.id), String(plotRow.uid)]
+  );
+
+  return rows[0] || null;
+}
+
+async function updatePlotPersonFields(client, plotIdentifier, graveLike, forceStatus = null) {
+  const plotRow = await resolvePlotRow(client, plotIdentifier, { forUpdate: true });
+  if (!plotRow) return null;
+
+  const sets = [];
+  const params = [plotRow.id];
+  let idx = 2;
+
+  if (forceStatus) {
+    sets.push(`status = $${idx++}`);
+    params.push(String(forceStatus));
+  }
+
+  if (await hasColumn("plots", "person_full_name")) {
+    sets.push(`person_full_name = $${idx++}`);
+    params.push(String(graveLike?.deceased_name || "").trim() || null);
+  }
+
+  if (await hasColumn("plots", "date_of_birth")) {
+    sets.push(`date_of_birth = $${idx++}`);
+    params.push(normDate(graveLike?.birth_date));
+  }
+
+  if (await hasColumn("plots", "date_of_death")) {
+    sets.push(`date_of_death = $${idx++}`);
+    params.push(normDate(graveLike?.death_date));
+  }
+
+  if (await hasColumn("plots", "updated_at")) {
+    sets.push(`updated_at = NOW()`);
+  }
+
+  if (sets.length) {
+    await client.query(
+      `
+      UPDATE plots
+      SET ${sets.join(", ")}
+      WHERE id = $1
+      `,
+      params
+    );
+  }
+
+  return plotRow;
+}
+
+async function clearPlotPersonFields(client, plotIdentifier, forceStatus = "available") {
+  const plotRow = await resolvePlotRow(client, plotIdentifier, { forUpdate: true });
+  if (!plotRow) return null;
+
+  const sets = [];
+  const params = [plotRow.id];
+  let idx = 2;
+
+  if (forceStatus) {
+    sets.push(`status = $${idx++}`);
+    params.push(String(forceStatus));
+  }
+
+  if (await hasColumn("plots", "person_full_name")) {
+    sets.push(`person_full_name = NULL`);
+  }
+
+  if (await hasColumn("plots", "date_of_birth")) {
+    sets.push(`date_of_birth = NULL`);
+  }
+
+  if (await hasColumn("plots", "date_of_death")) {
+    sets.push(`date_of_death = NULL`);
+  }
+
+  if (await hasColumn("plots", "updated_at")) {
+    sets.push(`updated_at = NOW()`);
+  }
+
+  if (sets.length) {
+    await client.query(
+      `
+      UPDATE plots
+      SET ${sets.join(", ")}
+      WHERE id = $1
+      `,
+      params
+    );
+  }
+
+  return plotRow;
+}
+
+async function refreshPlotFromExistingGraves(client, plotIdentifier) {
+  const plotRow = await resolvePlotRow(client, plotIdentifier, { forUpdate: true });
+  if (!plotRow) return null;
+
+  const count = await countGravesForPlot(client, plotRow);
+
+  if (count <= 0) {
+    await clearPlotPersonFields(client, plotRow.id, "available");
+    return { plotRow, occupied: false, count: 0 };
+  }
+
+  const latestGrave = await getLatestGraveForPlot(client, plotRow);
+  if (latestGrave) {
+    await updatePlotPersonFields(client, plotRow.id, latestGrave, "occupied");
+  }
+
+  return { plotRow, occupied: true, count, latestGrave };
+}
+
 /* ============================================================
  * GET burial records
  * - optional filter by family_contact (param or query)
@@ -97,9 +277,12 @@ async function getBurialRecords(req, res, next) {
         g.*,
         u.first_name || ' ' || u.last_name AS family_contact_name,
 
-        p.plot_name AS plot_name,
-        p.status    AS plot_status,
-        p.uid       AS plot_uid
+        p.plot_name          AS plot_name,
+        p.status             AS plot_status,
+        p.uid                AS plot_uid,
+        p.person_full_name   AS plot_person_full_name,
+        p.date_of_birth      AS plot_date_of_birth,
+        p.date_of_death      AS plot_date_of_death
 
       FROM graves g
       LEFT JOIN users u ON g.family_contact = u.id
@@ -144,6 +327,7 @@ async function getBurialRecords(req, res, next) {
  * ADD burial record (admin)
  * - Inserts into graves
  * - Sets plot.status = 'occupied'
+ * - Syncs plots.person_full_name / DOB / DOD
  * ============================================================ */
 async function addBurialRecord(req, res, next) {
   const client = await pool.connect();
@@ -178,16 +362,11 @@ async function addBurialRecord(req, res, next) {
     await client.query("BEGIN");
 
     // ✅ lock plot using id OR uid
-    const plotLock = await client.query(
-      `SELECT id, uid, status, plot_name FROM plots WHERE id::text = $1 OR uid::text = $1 FOR UPDATE`,
-      [String(plot_id)]
-    );
-    if (!plotLock.rows.length) {
+    const plotRow = await resolvePlotRow(client, String(plot_id), { forUpdate: true });
+    if (!plotRow) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Plot not found" });
     }
-
-    const plotRow = plotLock.rows[0];
 
     // insert grave (store plot reference as given)
     const ins = await client.query(
@@ -215,11 +394,8 @@ async function addBurialRecord(req, res, next) {
       ]
     );
 
-    // ✅ mark plot occupied by REAL numeric id (safest)
-    await client.query(
-      `UPDATE plots SET status = 'occupied', updated_at = NOW() WHERE id = $1`,
-      [plotRow.id]
-    );
+    // ✅ sync plot status + deceased fields onto plots table
+    await updatePlotPersonFields(client, plotRow.id, ins.rows[0], "occupied");
 
     await client.query("COMMIT");
 
@@ -238,6 +414,8 @@ async function addBurialRecord(req, res, next) {
 
 /* ============================================================
  * EDIT burial record (admin)
+ * - Syncs plots.person_full_name / DOB / DOD
+ * - Handles moving burial record to another plot
  * ============================================================ */
 async function editBurialRecord(req, res, next) {
   const client = await pool.connect();
@@ -270,15 +448,29 @@ async function editBurialRecord(req, res, next) {
     await client.query("BEGIN");
 
     const cur = await client.query(
-      `SELECT id, uid, plot_id FROM graves WHERE id::text = $1 OR uid = $1 LIMIT 1`,
+      `
+      SELECT id, uid, plot_id
+      FROM graves
+      WHERE id::text = $1 OR uid = $1
+      LIMIT 1
+      FOR UPDATE
+      `,
       [String(identifier)]
     );
+
     if (cur.rows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Burial record not found" });
     }
 
     const oldPlotId = cur.rows[0].plot_id;
+    const targetPlotId = plot_id ? String(plot_id) : String(oldPlotId);
+
+    const targetPlotRow = await resolvePlotRow(client, targetPlotId, { forUpdate: true });
+    if (!targetPlotRow) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Target plot not found" });
+    }
 
     const updated = await client.query(
       `
@@ -312,28 +504,17 @@ async function editBurialRecord(req, res, next) {
       ]
     );
 
-    const newPlotId = updated.rows[0]?.plot_id;
+    const updatedRow = updated.rows[0];
+    const newPlotId = updatedRow?.plot_id;
 
-    // occupy new plot (id OR uid supported)
+    // sync new/current plot
     if (newPlotId) {
-      await client.query(
-        `UPDATE plots SET status='occupied', updated_at=NOW() WHERE id::text=$1 OR uid::text=$1`,
-        [String(newPlotId)]
-      );
+      await updatePlotPersonFields(client, String(newPlotId), updatedRow, "occupied");
     }
 
-    // free old plot if changed and no other graves use it
+    // if plot changed, refresh old plot based on whatever graves remain there
     if (oldPlotId && newPlotId && String(oldPlotId) !== String(newPlotId)) {
-      const check = await client.query(
-        `SELECT COUNT(*)::int AS n FROM graves WHERE plot_id::text = $1`,
-        [String(oldPlotId)]
-      );
-      if ((check.rows?.[0]?.n ?? 0) === 0) {
-        await client.query(
-          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1 OR uid::text=$1`,
-          [String(oldPlotId)]
-        );
-      }
+      await refreshPlotFromExistingGraves(client, String(oldPlotId));
     }
 
     await client.query("COMMIT");
@@ -353,6 +534,7 @@ async function editBurialRecord(req, res, next) {
 
 /* ============================================================
  * DELETE burial record (admin)
+ * - Clears or refreshes plot person fields after delete
  * ============================================================ */
 async function deleteBurialRecord(req, res, next) {
   const client = await pool.connect();
@@ -370,9 +552,16 @@ async function deleteBurialRecord(req, res, next) {
     await client.query("BEGIN");
 
     const cur = await client.query(
-      `SELECT id, uid, plot_id FROM graves WHERE id::text=$1 OR uid=$1 LIMIT 1`,
+      `
+      SELECT id, uid, plot_id
+      FROM graves
+      WHERE id::text = $1 OR uid = $1
+      LIMIT 1
+      FOR UPDATE
+      `,
       [String(identifier)]
     );
+
     if (cur.rows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Record not found." });
@@ -381,21 +570,12 @@ async function deleteBurialRecord(req, res, next) {
     const plotId = cur.rows[0].plot_id;
 
     const del = await client.query(
-      `DELETE FROM graves WHERE id::text=$1 OR uid=$1 RETURNING *`,
+      `DELETE FROM graves WHERE id::text = $1 OR uid = $1 RETURNING *`,
       [String(identifier)]
     );
 
     if (plotId) {
-      const check = await client.query(
-        `SELECT COUNT(*)::int AS n FROM graves WHERE plot_id::text = $1`,
-        [String(plotId)]
-      );
-      if ((check.rows?.[0]?.n ?? 0) === 0) {
-        await client.query(
-          `UPDATE plots SET status='available', updated_at=NOW() WHERE id::text=$1 OR uid::text=$1`,
-          [String(plotId)]
-        );
-      }
+      await refreshPlotFromExistingGraves(client, String(plotId));
     }
 
     await client.query("COMMIT");
